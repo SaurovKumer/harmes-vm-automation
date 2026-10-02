@@ -128,6 +128,23 @@ jobs:
               except Exception:
                   return 0
 
+          def auto_start_settings():
+              t = tags()
+              enabled = str(t.get("AutoStartEnabled", "true") or "true").lower() == "true"
+              hhmm = str(t.get("AutoStartTime", "06:00") or "06:00")
+              last_date = str(t.get("AutoStartLastDate", "") or "")
+              return enabled, hhmm, last_date
+
+          def auto_start_text():
+              enabled, hhmm, _ = auto_start_settings()
+              if not enabled:
+                  return "OFF"
+              try:
+                  dt = datetime.strptime(hhmm, "%H:%M")
+                  return dt.strftime("%I:%M %p")
+              except Exception:
+                  return hhmm
+
           def dhaka_text(epoch):
               return datetime.fromtimestamp(int(epoch), DHAKA).strftime("%Y-%m-%d %I:%M %p")
 
@@ -156,12 +173,14 @@ jobs:
                       f"🖥 {VM}\n"
                       f"Status: {label}\n"
                       f"⏳ Planned deallocation: {dhaka_text(deadline)}\n"
-                      f"⌛ Remaining: {remaining_text(deadline)}"
+                      f"⌛ Remaining: {remaining_text(deadline)}\n"
+                      f"⏰ Daily auto-start: {auto_start_text()} (Bangladesh time)"
                   )
               return (
                   f"🖥 {VM}\n"
                   f"Status: {label}\n"
-                  f"⏳ Planned deallocation: not currently set"
+                  f"⏳ Planned deallocation: not currently set\n"
+                  f"⏰ Daily auto-start: {auto_start_text()} (Bangladesh time)"
               )
 
           def warning_keyboard(deadline):
@@ -277,7 +296,53 @@ jobs:
               chat = msg.get("chat") or {}
               if str(chat.get("id")) != CHAT_ID:
                   return
-              text = (msg.get("text") or "").strip().split("@", 1)[0].lower()
+              raw_text = (msg.get("text") or "").strip()
+              text = raw_text.split("@", 1)[0].lower()
+
+              if text.startswith("/autostart"):
+                  parts = raw_text.split()
+                  now_local = datetime.now(DHAKA)
+
+                  if len(parts) == 1 or (len(parts) >= 2 and parts[1].lower() == "status"):
+                      send(
+                          f"⏰ Daily auto-start: {auto_start_text()} (Bangladesh time)\n"
+                          f"Use /autostart HH:MM to change it.\n"
+                          f"Example: /autostart 07:30\n"
+                          f"Use /autostart off to disable."
+                      )
+                      return
+
+                  value = parts[1].strip().lower()
+
+                  if value == "off":
+                      set_tags(AutoStartEnabled="false")
+                      send("⏰ Daily auto-start is now OFF.")
+                      return
+
+                  try:
+                      chosen = datetime.strptime(value, "%H:%M")
+                  except Exception:
+                      send("❌ Invalid time. Use 24-hour HH:MM, for example /autostart 07:30")
+                      return
+
+                  hhmm = chosen.strftime("%H:%M")
+                  today = now_local.strftime("%Y-%m-%d")
+                  current_hhmm = now_local.strftime("%H:%M")
+
+                  # If today's selected time already passed, do not start retroactively.
+                  last_date = today if hhmm <= current_hhmm else "pending"
+
+                  set_tags(
+                      AutoStartEnabled="true",
+                      AutoStartTime=hhmm,
+                      AutoStartLastDate=last_date
+                  )
+
+                  send(
+                      f"✅ Daily auto-start changed to {chosen.strftime('%I:%M %p')} Bangladesh time.\n"
+                      f"VM will get a fresh 30-minute safety timer when auto-started."
+                  )
+                  return
 
               if text == "/status":
                   send(status_message())
@@ -298,7 +363,9 @@ jobs:
               elif text == "/help":
                   send(
                       "Commands:\n"
-                      "/status - show current VM state and planned deallocation\n"
+                      "/status - show VM status, deallocation, and auto-start time\n"
+                      "/autostart HH:MM - set daily auto-start (Bangladesh time)\n"
+                      "/autostart off - disable daily auto-start\n"
                       "/startvm - start VM with a 30-minute timer\n"
                       "/keep30 - add 30 minutes\n"
                       "/keep60 - add 1 hour\n"
@@ -314,7 +381,8 @@ jobs:
           try:
               tg("setMyCommands", {
                   "commands": json.dumps([
-                      {"command": "status", "description": "VM status and deallocation time"},
+                      {"command": "status", "description": "VM status, deallocation and auto-start"},
+                      {"command": "autostart", "description": "Set daily auto-start: /autostart HH:MM"},
                       {"command": "startvm", "description": "Start VM for 30 minutes"},
                       {"command": "keep30", "description": "Extend by 30 minutes"},
                       {"command": "keep60", "description": "Extend by 1 hour"},
@@ -344,6 +412,52 @@ jobs:
                   tg("getUpdates", {"offset": int(max_update) + 1, "timeout": 0})
           except Exception as e:
               print("Telegram update processing issue:", e)
+
+          # Dynamic daily auto-start (Bangladesh time).
+          # The monitor runs every 5 minutes, so start may occur a few minutes after the selected time.
+          now_local = datetime.now(DHAKA)
+          today = now_local.strftime("%Y-%m-%d")
+          current_hhmm = now_local.strftime("%H:%M")
+          t_before_auto = tags()
+
+          if "AutoStartTime" not in t_before_auto:
+              # Keep the previous default of 06:00, but do not retroactively start today
+              # if this feature is being initialized after 06:00.
+              baseline_last = today if current_hhmm >= "06:00" else "pending"
+              set_tags(
+                  AutoStartEnabled="true",
+                  AutoStartTime="06:00",
+                  AutoStartLastDate=baseline_last
+              )
+
+          auto_enabled, auto_hhmm, auto_last_date = auto_start_settings()
+
+          if auto_enabled and auto_last_date != today and current_hhmm >= auto_hhmm:
+              current_state = power_state()
+              current_stable = stable_state(current_state)
+
+              if current_stable != "running":
+                  print(f"Daily auto-start due at {auto_hhmm}. Starting VM...")
+                  az("vm", "start", "-g", RG, "-n", VM)
+
+                  deadline = int(time.time()) + 30 * 60
+                  set_tags(
+                      RunUntilEpoch=deadline,
+                      RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
+                      WarningForEpoch=0,
+                      LastPowerState="running",
+                      AutoStartLastDate=today
+                  )
+
+                  send(
+                      f"⏰ Daily AUTO-START triggered.\n"
+                      f"🟢 {VM} is RUNNING.\n"
+                      f"Auto-start time: {auto_start_text()} Bangladesh time\n"
+                      f"Automatic DEALLOCATION: {dhaka_text(deadline)}"
+                  )
+              else:
+                  # Already running at the scheduled time; mark today handled.
+                  set_tags(AutoStartLastDate=today)
 
           state = power_state()
           stable = stable_state(state)
