@@ -1005,3 +1005,11 @@ function shortError(err) {
   const text = String(err?.message || err || "Unknown error");
   return text.length > 500 ? text.slice(0, 500) + "…" : text;
 }
+
+
+function jsonResponse(value, status = 200) {
+  return new Response(JSON.stringify(value, null, 2), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" }
+  });
+}
