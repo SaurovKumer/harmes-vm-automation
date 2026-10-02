@@ -1,0 +1,101 @@
+name: Harmes VM Schedule
+
+on:
+  schedule:
+    # Bangladesh time is UTC+6 (no DST)
+    # 08:00 Dhaka = 02:00 UTC
+    - cron: '0 2 * * *'
+    # 09:00 Dhaka = 03:00 UTC
+    - cron: '0 3 * * *'
+    # 22:00 Dhaka = 16:00 UTC
+    - cron: '0 16 * * *'
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Manual action'
+        required: true
+        default: 'status'
+        type: choice
+        options:
+          - status
+          - start
+          - deallocate
+          - morning-check
+          - night-check
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: harmes-vm_group
+  VM_NAME: harmes-vm
+
+jobs:
+  manage-vm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Show VM status
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'status'
+        run: |
+          az vm get-instance-view             --resource-group "$RESOURCE_GROUP"             --name "$VM_NAME"             --query "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus"             --output tsv
+
+      - name: Start VM at 08:00 Dhaka
+        if: >
+          github.event.schedule == '0 2 * * *' ||
+          (github.event_name == 'workflow_dispatch' && inputs.action == 'start')
+        run: |
+          echo "Resetting extension state..."
+          VM_ID=$(az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" --query id -o tsv)
+
+          az tag update             --resource-id "$VM_ID"             --operation Merge             --tags RunUntilEpoch=0 RunUntilLocal=none
+
+          echo "Setting default auto-shutdown to 09:00 Dhaka (03:00 UTC)..."
+          az vm auto-shutdown             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --time 0300
+
+          echo "Starting VM..."
+          az vm start             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --no-wait
+
+      - name: Check extension and deallocate
+        if: >
+          github.event.schedule == '0 3 * * *' ||
+          github.event.schedule == '0 16 * * *' ||
+          (github.event_name == 'workflow_dispatch' &&
+            (inputs.action == 'morning-check' || inputs.action == 'night-check'))
+        shell: bash
+        run: |
+          VM_ID=$(az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" --query id -o tsv)
+
+          RUN_UNTIL=$(az vm show             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --query "tags.RunUntilEpoch"             -o tsv)
+
+          RUN_UNTIL_LOCAL=$(az vm show             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --query "tags.RunUntilLocal"             -o tsv)
+
+          NOW=$(date +%s)
+
+          echo "Now epoch: $NOW"
+          echo "RunUntilEpoch: ${RUN_UNTIL:-none}"
+          echo "RunUntilLocal: ${RUN_UNTIL_LOCAL:-none}"
+
+          if [[ "${RUN_UNTIL:-}" =~ ^[0-9]+$ ]] && [ "$RUN_UNTIL" -gt "$NOW" ]; then
+            echo "Shutdown skipped. VM may continue until $RUN_UNTIL_LOCAL."
+            exit 0
+          fi
+
+          echo "No active extension. Deallocating VM..."
+          az vm deallocate             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --no-wait
+
+          az tag update             --resource-id "$VM_ID"             --operation Merge             --tags RunUntilEpoch=0 RunUntilLocal=none
+
+      - name: Manual deallocate
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'deallocate'
+        run: |
+          az vm deallocate             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --no-wait
