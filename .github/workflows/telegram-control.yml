@@ -90,6 +90,16 @@ jobs:
           def is_running():
               return "running" in power_state().lower()
 
+          def stable_state(raw):
+              s = (raw or "").lower()
+              if "running" in s:
+                  return "running"
+              if "deallocated" in s:
+                  return "deallocated"
+              if "stopped" in s:
+                  return "stopped"
+              return ""
+
           def tg(method, payload=None, timeout=20):
               data = urllib.parse.urlencode(payload or {}).encode()
               req = urllib.request.Request(f"{API}/{method}", data=data)
@@ -151,6 +161,13 @@ jobs:
                       {"text": "⏱ +1 hour", "callback_data": f"keep60|{d}"}
                   ],
                   [
+                      {"text": "⏱ +2 hours", "callback_data": f"keep120|{d}"},
+                      {"text": "⏱ +3 hours", "callback_data": f"keep180|{d}"}
+                  ],
+                  [
+                      {"text": "⏱ +4 hours", "callback_data": f"keep240|{d}"}
+                  ],
+                  [
                       {"text": "📊 Status", "callback_data": f"status|{d}"},
                       {"text": "🛑 Shutdown now", "callback_data": f"shutdown|{d}"}
                   ]
@@ -167,7 +184,12 @@ jobs:
 
           def deallocate(reason):
               az("vm", "deallocate", "-g", RG, "-n", VM, "--no-wait")
-              set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+              set_tags(
+                  RunUntilEpoch=0,
+                  RunUntilLocal="none",
+                  WarningForEpoch=0,
+                  LastPowerState="deallocated"
+              )
               send(f"🛑 {VM}: deallocation requested.\nReason: {reason}")
 
           def extend(minutes):
@@ -191,7 +213,8 @@ jobs:
               set_tags(
                   RunUntilEpoch=deadline,
                   RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
-                  WarningForEpoch=0
+                  WarningForEpoch=0,
+                  LastPowerState="running"
               )
               send(
                   f"🟢 {VM} started from Telegram.\n"
@@ -222,6 +245,15 @@ jobs:
                   elif action == "keep60":
                       answer_callback(callback_id, "Extended +1 hour")
                       extend(60)
+                  elif action == "keep120":
+                      answer_callback(callback_id, "Extended +2 hours")
+                      extend(120)
+                  elif action == "keep180":
+                      answer_callback(callback_id, "Extended +3 hours")
+                      extend(180)
+                  elif action == "keep240":
+                      answer_callback(callback_id, "Extended +4 hours")
+                      extend(240)
                   elif action == "shutdown":
                       answer_callback(callback_id, "Shutting down")
                       deallocate("Telegram button")
@@ -244,6 +276,12 @@ jobs:
                   extend(30)
               elif text == "/keep60":
                   extend(60)
+              elif text == "/keep120":
+                  extend(120)
+              elif text == "/keep180":
+                  extend(180)
+              elif text == "/keep240":
+                  extend(240)
               elif text == "/shutdown":
                   deallocate("Telegram command")
               elif text == "/help":
@@ -253,6 +291,9 @@ jobs:
                       "/startvm - start VM with a 30-minute timer\n"
                       "/keep30 - add 30 minutes\n"
                       "/keep60 - add 1 hour\n"
+                      "/keep120 - add 2 hours\n"
+                      "/keep180 - add 3 hours\n"
+                      "/keep240 - add 4 hours\n"
                       "/shutdown - deallocate now\n"
                       "/help - show commands"
                   )
@@ -265,6 +306,9 @@ jobs:
                       {"command": "startvm", "description": "Start VM for 30 minutes"},
                       {"command": "keep30", "description": "Extend by 30 minutes"},
                       {"command": "keep60", "description": "Extend by 1 hour"},
+                      {"command": "keep120", "description": "Extend by 2 hours"},
+                      {"command": "keep180", "description": "Extend by 3 hours"},
+                      {"command": "keep240", "description": "Extend by 4 hours"},
                       {"command": "shutdown", "description": "Deallocate VM now"},
                       {"command": "help", "description": "Show commands"}
                   ])
@@ -290,35 +334,89 @@ jobs:
               print("Telegram update processing issue:", e)
 
           state = power_state()
+          stable = stable_state(state)
           now = int(time.time())
-          deadline = current_deadline()
+          tnow = tags()
+          last_state = str(tnow.get("LastPowerState", "") or "").lower()
 
-          # If the VM was started outside GitHub/Telegram, detect it and attach
-          # a default 30-minute safety timer.
-          if "running" in state.lower() and deadline <= 0:
-              deadline = now + 30 * 60
-              set_tags(
-                  RunUntilEpoch=deadline,
-                  RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
-                  WarningForEpoch=0
-              )
-              send(
-                  f"🟢 External VM start detected.\n"
-                  f"A 30-minute safety timer was attached.\n"
-                  f"Planned deallocation: {dhaka_text(deadline)}"
-              )
-
-          # Re-read after command processing/detection.
-          state = power_state()
-          now = int(time.time())
-          t = tags()
           try:
-              deadline = int(t.get("RunUntilEpoch", "0") or 0)
+              deadline = int(tnow.get("RunUntilEpoch", "0") or 0)
           except Exception:
               deadline = 0
-          warned_for = str(t.get("WarningForEpoch", "0"))
 
-          if "running" in state.lower() and deadline > 0:
+          # Establish a baseline silently if the first observed stable state is OFF.
+          # If the first observed state is RUNNING with no timer, treat it as an
+          # external/manual start and attach the 30-minute safety timer.
+          if not last_state and stable:
+              if stable == "running":
+                  if deadline <= now:
+                      deadline = now + 30 * 60
+                      set_tags(
+                          RunUntilEpoch=deadline,
+                          RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
+                          WarningForEpoch=0,
+                          LastPowerState="running"
+                      )
+                      send(
+                          f"🟢 Manual/external VM start detected.\n"
+                          f"A 30-minute safety timer was attached.\n"
+                          f"Planned deallocation: {dhaka_text(deadline)}"
+                      )
+                  else:
+                      set_tags(LastPowerState="running")
+              else:
+                  set_tags(LastPowerState=stable)
+                  if deadline > 0:
+                      set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+
+          # Notify when the Azure Portal / VM itself changes state outside our bot.
+          elif stable and stable != last_state:
+              if stable == "running":
+                  if deadline <= now:
+                      deadline = now + 30 * 60
+                      set_tags(
+                          RunUntilEpoch=deadline,
+                          RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
+                          WarningForEpoch=0,
+                          LastPowerState="running"
+                      )
+                  else:
+                      set_tags(LastPowerState="running")
+
+                  send(
+                      f"🟢 Manual/external VM ON detected.\n"
+                      f"Status: {state}\n"
+                      f"Planned deallocation: {dhaka_text(deadline)}"
+                  )
+
+              elif stable in ("deallocated", "stopped"):
+                  set_tags(
+                      RunUntilEpoch=0,
+                      RunUntilLocal="none",
+                      WarningForEpoch=0,
+                      LastPowerState=stable
+                  )
+                  send(
+                      f"🔴 Manual/external VM OFF detected.\n"
+                      f"Status: {state}\n"
+                      f"Any previous shutdown timer was cleared."
+                  )
+                  deadline = 0
+
+          # Re-read after command processing / manual state detection.
+          state = power_state()
+          stable = stable_state(state)
+          now = int(time.time())
+          tnow = tags()
+
+          try:
+              deadline = int(tnow.get("RunUntilEpoch", "0") or 0)
+          except Exception:
+              deadline = 0
+
+          warned_for = str(tnow.get("WarningForEpoch", "0"))
+
+          if stable == "running" and deadline > 0:
               remaining = deadline - now
 
               if remaining <= 0:
@@ -326,8 +424,13 @@ jobs:
               elif remaining <= 300 and warned_for != str(deadline):
                   send_warning(deadline)
 
-          elif "deallocated" in state.lower() and deadline > 0:
-              set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+          elif stable in ("deallocated", "stopped") and deadline > 0:
+              set_tags(
+                  RunUntilEpoch=0,
+                  RunUntilLocal="none",
+                  WarningForEpoch=0,
+                  LastPowerState=stable
+              )
 
           print(status_message())
           PY
