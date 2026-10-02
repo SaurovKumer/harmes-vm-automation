@@ -141,19 +141,30 @@ jobs:
               except Exception:
                   return 0
 
+          def state_label(state):
+              s = (state or "").lower()
+              if "deallocated" in s:
+                  return "🔴 DEALLOCATED"
+              if "stopped" in s:
+                  return "🟠 STOPPED (NOT DEALLOCATED)"
+              if "running" in s:
+                  return "🟢 RUNNING"
+              return state or "Unknown"
+
           def status_message():
               state = power_state()
               deadline = current_deadline()
+              label = state_label(state)
               if deadline > int(time.time()):
                   return (
                       f"🖥 {VM}\n"
-                      f"Status: {state}\n"
+                      f"Status: {label}\n"
                       f"⏳ Planned deallocation: {dhaka_text(deadline)}\n"
                       f"⌛ Remaining: {remaining_text(deadline)}"
                   )
               return (
                   f"🖥 {VM}\n"
-                  f"Status: {state}\n"
+                  f"Status: {label}\n"
                   f"⏳ Planned deallocation: not currently set"
               )
 
@@ -173,7 +184,7 @@ jobs:
                   ],
                   [
                       {"text": "📊 Status", "callback_data": f"status|{d}"},
-                      {"text": "🛑 Shutdown now", "callback_data": f"shutdown|{d}"}
+                      {"text": "🛑 Deallocate now", "callback_data": f"shutdown|{d}"}
                   ]
               ]
 
@@ -182,7 +193,7 @@ jobs:
               send(
                   f"⚠️ {VM} will be deallocated in about 5 minutes.\n"
                   f"Scheduled: {dhaka_text(deadline)}\n\n"
-                  f"If you do nothing, it will shut down automatically.",
+                  f"If you do nothing, the VM will be DEALLOCATED automatically.",
                   warning_keyboard(deadline)
               )
 
@@ -250,7 +261,7 @@ jobs:
                       answer_callback(callback_id, "Extended +4 hours")
                       extend(240)
                   elif action == "shutdown":
-                      answer_callback(callback_id, "Shutting down")
+                      answer_callback(callback_id, "Deallocating VM")
                       deallocate("Telegram button")
                   elif action == "status":
                       answer_callback(callback_id, "Status sent")
@@ -275,18 +286,19 @@ jobs:
                   extend(180)
               elif text == "/keep240":
                   extend(240)
-              elif text == "/shutdown":
+              elif text in ("/deallocate", "/shutdown"):
                   deallocate("Telegram command")
               elif text == "/help":
                   send(
                       "Commands:\n"
-                      "/status - current VM status and planned shutdown\n"
-                      "/keep30 - extend shutdown by 30 minutes\n"
-                      "/keep60 - extend shutdown by 1 hour\n"
-                      "/keep120 - extend shutdown by 2 hours\n"
-                      "/keep180 - extend shutdown by 3 hours\n"
-                      "/keep240 - extend shutdown by 4 hours\n"
-                      "/shutdown - deallocate now"
+                      "/status - current VM status and planned deallocation\n"
+                      "/keep30 - extend deallocation by 30 minutes\n"
+                      "/keep60 - extend deallocation by 1 hour\n"
+                      "/keep120 - extend deallocation by 2 hours\n"
+                      "/keep180 - extend deallocation by 3 hours\n"
+                      "/keep240 - extend deallocation by 4 hours\n"
+                      "/deallocate - deallocate now\n"
+                      "/shutdown - alias for /deallocate"
                   )
 
           print("Starting VM...")
@@ -303,7 +315,7 @@ jobs:
           send(
               f"🟢 {VM} is running.\n"
               f"Automatic deallocation: {dhaka_text(deadline)}\n"
-              f"You will get another warning 5 minutes before shutdown.\n\n"
+              f"You will get another warning 5 minutes before DEALLOCATION.\n\n"
               f"Send /status anytime to check."
           )
 
@@ -333,7 +345,7 @@ jobs:
               if seconds_left > 4 * 3600:
                   send(
                       f"ℹ️ Long extension saved until {dhaka_text(deadline)}.\n"
-                      f"The background monitor will handle the warning and shutdown."
+                      f"The background monitor will handle the warning and deallocation."
                   )
                   break
 
