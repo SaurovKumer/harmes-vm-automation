@@ -137,19 +137,30 @@ jobs:
               m = rem // 60
               return f"{h}h {m}m" if h else f"{m}m"
 
+          def state_label(state):
+              s = (state or "").lower()
+              if "deallocated" in s:
+                  return "🔴 DEALLOCATED"
+              if "stopped" in s:
+                  return "🟠 STOPPED (NOT DEALLOCATED)"
+              if "running" in s:
+                  return "🟢 RUNNING"
+              return state or "Unknown"
+
           def status_message():
               state = power_state()
               deadline = current_deadline()
+              label = state_label(state)
               if deadline > int(time.time()):
                   return (
                       f"🖥 {VM}\n"
-                      f"Status: {state}\n"
+                      f"Status: {label}\n"
                       f"⏳ Planned deallocation: {dhaka_text(deadline)}\n"
                       f"⌛ Remaining: {remaining_text(deadline)}"
                   )
               return (
                   f"🖥 {VM}\n"
-                  f"Status: {state}\n"
+                  f"Status: {label}\n"
                   f"⏳ Planned deallocation: not currently set"
               )
 
@@ -169,7 +180,7 @@ jobs:
                   ],
                   [
                       {"text": "📊 Status", "callback_data": f"status|{d}"},
-                      {"text": "🛑 Shutdown now", "callback_data": f"shutdown|{d}"}
+                      {"text": "🛑 Deallocate now", "callback_data": f"shutdown|{d}"}
                   ]
               ]
 
@@ -178,7 +189,7 @@ jobs:
               send(
                   f"⚠️ {VM} will be deallocated in about 5 minutes.\n"
                   f"Scheduled: {dhaka_text(deadline)}\n\n"
-                  f"No response = automatic shutdown.",
+                  f"No response = automatic DEALLOCATION.",
                   warning_keyboard(deadline)
               )
 
@@ -255,7 +266,7 @@ jobs:
                       answer_callback(callback_id, "Extended +4 hours")
                       extend(240)
                   elif action == "shutdown":
-                      answer_callback(callback_id, "Shutting down")
+                      answer_callback(callback_id, "Deallocating VM")
                       deallocate("Telegram button")
                   elif action == "status":
                       answer_callback(callback_id, "Status sent")
@@ -282,19 +293,20 @@ jobs:
                   extend(180)
               elif text == "/keep240":
                   extend(240)
-              elif text == "/shutdown":
+              elif text in ("/deallocate", "/shutdown"):
                   deallocate("Telegram command")
               elif text == "/help":
                   send(
                       "Commands:\n"
-                      "/status - show current VM state and planned shutdown\n"
+                      "/status - show current VM state and planned deallocation\n"
                       "/startvm - start VM with a 30-minute timer\n"
                       "/keep30 - add 30 minutes\n"
                       "/keep60 - add 1 hour\n"
                       "/keep120 - add 2 hours\n"
                       "/keep180 - add 3 hours\n"
                       "/keep240 - add 4 hours\n"
-                      "/shutdown - deallocate now\n"
+                      "/deallocate - deallocate VM now\n"
+                      "/shutdown - alias for /deallocate\n"
                       "/help - show commands"
                   )
 
@@ -302,14 +314,14 @@ jobs:
           try:
               tg("setMyCommands", {
                   "commands": json.dumps([
-                      {"command": "status", "description": "VM status and shutdown time"},
+                      {"command": "status", "description": "VM status and deallocation time"},
                       {"command": "startvm", "description": "Start VM for 30 minutes"},
                       {"command": "keep30", "description": "Extend by 30 minutes"},
                       {"command": "keep60", "description": "Extend by 1 hour"},
                       {"command": "keep120", "description": "Extend by 2 hours"},
                       {"command": "keep180", "description": "Extend by 3 hours"},
                       {"command": "keep240", "description": "Extend by 4 hours"},
-                      {"command": "shutdown", "description": "Deallocate VM now"},
+                      {"command": "deallocate", "description": "Deallocate VM now"},
                       {"command": "help", "description": "Show commands"}
                   ])
               })
@@ -365,9 +377,22 @@ jobs:
                   else:
                       set_tags(LastPowerState="running")
               else:
-                  set_tags(LastPowerState=stable)
-                  if deadline > 0:
-                      set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+                  if stable == "stopped":
+                      send(
+                          f"🟠 VM is STOPPED but NOT DEALLOCATED.\n"
+                          f"Requesting DEALLOCATION now to release compute allocation."
+                      )
+                      az("vm", "deallocate", "-g", RG, "-n", VM, "--no-wait")
+                      set_tags(
+                          RunUntilEpoch=0,
+                          RunUntilLocal="none",
+                          WarningForEpoch=0,
+                          LastPowerState="deallocated"
+                      )
+                  else:
+                      set_tags(LastPowerState=stable)
+                      if deadline > 0:
+                          set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
 
           # Notify when the Azure Portal / VM itself changes state outside our bot.
           elif stable and stable != last_state:
@@ -385,21 +410,38 @@ jobs:
 
                   send(
                       f"🟢 Manual/external VM ON detected.\n"
-                      f"Status: {state}\n"
+                      f"Status: 🟢 RUNNING\n"
                       f"Planned deallocation: {dhaka_text(deadline)}"
                   )
 
-              elif stable in ("deallocated", "stopped"):
+              elif stable == "deallocated":
                   set_tags(
                       RunUntilEpoch=0,
                       RunUntilLocal="none",
                       WarningForEpoch=0,
-                      LastPowerState=stable
+                      LastPowerState="deallocated"
                   )
                   send(
-                      f"🔴 Manual/external VM OFF detected.\n"
-                      f"Status: {state}\n"
-                      f"Any previous shutdown timer was cleared."
+                      f"🔴 Manual/external VM DEALLOCATION detected.\n"
+                      f"Status: 🔴 DEALLOCATED\n"
+                      f"Compute allocation has been released.\n"
+                      f"Any previous deallocation timer was cleared."
+                  )
+                  deadline = 0
+
+              elif stable == "stopped":
+                  send(
+                      f"🟠 Manual/external VM STOP detected.\n"
+                      f"Status: 🟠 STOPPED (NOT DEALLOCATED)\n"
+                      f"This is not the same as deallocated.\n"
+                      f"Requesting DEALLOCATION now to release compute allocation."
+                  )
+                  az("vm", "deallocate", "-g", RG, "-n", VM, "--no-wait")
+                  set_tags(
+                      RunUntilEpoch=0,
+                      RunUntilLocal="none",
+                      WarningForEpoch=0,
+                      LastPowerState="deallocated"
                   )
                   deadline = 0
 
@@ -424,12 +466,25 @@ jobs:
               elif remaining <= 300 and warned_for != str(deadline):
                   send_warning(deadline)
 
-          elif stable in ("deallocated", "stopped") and deadline > 0:
+          elif stable == "deallocated" and deadline > 0:
               set_tags(
                   RunUntilEpoch=0,
                   RunUntilLocal="none",
                   WarningForEpoch=0,
-                  LastPowerState=stable
+                  LastPowerState="deallocated"
+              )
+
+          elif stable == "stopped":
+              send(
+                  f"🟠 {VM} is STOPPED but NOT DEALLOCATED.\n"
+                  f"Requesting DEALLOCATION now to release compute allocation."
+              )
+              az("vm", "deallocate", "-g", RG, "-n", VM, "--no-wait")
+              set_tags(
+                  RunUntilEpoch=0,
+                  RunUntilLocal="none",
+                  WarningForEpoch=0,
+                  LastPowerState="deallocated"
               )
 
           print(status_message())
