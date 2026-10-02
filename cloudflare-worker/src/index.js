@@ -698,6 +698,64 @@ async function runScheduler(env) {
   }
 }
 
+async function queryCostWithRetry(env, url, body, maxAttempts = 4) {
+  const token = await getAzureToken(env);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    const text = await res.text();
+    let data = null;
+
+    if (text) {
+      try {
+        data = JSON.parse(text);
+      } catch {
+        data = text;
+      }
+    }
+
+    if (res.ok) {
+      return data;
+    }
+
+    const retryAfterRaw =
+      res.headers.get("x-ms-ratelimit-microsoft.consumption-retry-after") ||
+      res.headers.get("retry-after");
+
+    let retrySeconds = Number.parseInt(String(retryAfterRaw || ""), 10);
+    if (!Number.isFinite(retrySeconds) || retrySeconds < 1) {
+      retrySeconds = Math.min(2 ** attempt, 8);
+    }
+
+    if ((res.status === 429 || res.status === 503) && attempt < maxAttempts) {
+      const waitSeconds = Math.min(retrySeconds, 10);
+      await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+      continue;
+    }
+
+    const hint =
+      res.status === 429
+        ? "Azure Cost Management temporarily throttled the request. Please try again after a short wait."
+        : res.status === 503
+          ? "Azure Cost Management is temporarily unavailable. Please try again shortly."
+          : "";
+
+    throw new Error(
+      `Azure Cost Management ${res.status}: ${safeText(data)}${hint ? " " + hint : ""}`
+    );
+  }
+
+  throw new Error("Azure Cost Management query failed after retries.");
+}
+
 async function costMessage(env, days) {
   try {
     const end = new Date();
@@ -724,12 +782,10 @@ async function costMessage(env, days) {
       }
     };
 
-    const { data } = await azureRequest(
-      env,
-      "POST",
-      `${scope}/providers/Microsoft.CostManagement/query?api-version=${COST_API}`,
-      body
-    );
+    const url =
+      `${ARM}${scope}/providers/Microsoft.CostManagement/query?api-version=${COST_API}`;
+
+    const data = await queryCostWithRetry(env, url, body);
 
     const columns = data?.properties?.columns || [];
     const rows = data?.properties?.rows || [];
@@ -771,9 +827,17 @@ async function costMessage(env, days) {
       "ℹ️ Azure cost data may arrive with a delay."
     );
   } catch (err) {
+    const msg = String(err?.message || err || "");
+
+    if (msg.includes("429")) {
+      return (
+        `⏳ Azure temporarily rate-limited the cost query for the last ${days} day(s).\n` +
+        "Please wait a little and try the command again."
+      );
+    }
+
     return (
       `❌ Cost query failed for the last ${days} day(s).\n` +
-      "The Azure application may need Cost Management Reader permission.\n" +
       `Error: ${shortError(err)}`
     );
   }
