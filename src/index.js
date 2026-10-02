@@ -4,8 +4,6 @@ const ARM = "https://management.azure.com";
 const COMPUTE_API = "2025-04-01";
 const TAGS_API = "2021-04-01";
 const COST_API = "2026-06-01";
-const BILLING_API = "2024-04-01";
-const CREDIT_API = "2026-06-01";
 
 export default {
   async fetch(request, env, ctx) {
