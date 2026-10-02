@@ -165,6 +165,13 @@ jobs:
                       {"text": "⏱ +1 hour", "callback_data": f"keep60|{d}"}
                   ],
                   [
+                      {"text": "⏱ +2 hours", "callback_data": f"keep120|{d}"},
+                      {"text": "⏱ +3 hours", "callback_data": f"keep180|{d}"}
+                  ],
+                  [
+                      {"text": "⏱ +4 hours", "callback_data": f"keep240|{d}"}
+                  ],
+                  [
                       {"text": "📊 Status", "callback_data": f"status|{d}"},
                       {"text": "🛑 Shutdown now", "callback_data": f"shutdown|{d}"}
                   ]
@@ -182,7 +189,12 @@ jobs:
           def deallocate(reason):
               print("Deallocating VM:", reason)
               az("vm", "deallocate", "-g", RG, "-n", VM, "--no-wait")
-              set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+              set_tags(
+                  RunUntilEpoch=0,
+                  RunUntilLocal="none",
+                  WarningForEpoch=0,
+                  LastPowerState="deallocated"
+              )
               send(f"🛑 {VM}: deallocation requested.\nReason: {reason}")
 
           def extend(minutes):
@@ -228,6 +240,15 @@ jobs:
                   elif action == "keep60":
                       answer_callback(callback_id, "Extended +1 hour")
                       extend(60)
+                  elif action == "keep120":
+                      answer_callback(callback_id, "Extended +2 hours")
+                      extend(120)
+                  elif action == "keep180":
+                      answer_callback(callback_id, "Extended +3 hours")
+                      extend(180)
+                  elif action == "keep240":
+                      answer_callback(callback_id, "Extended +4 hours")
+                      extend(240)
                   elif action == "shutdown":
                       answer_callback(callback_id, "Shutting down")
                       deallocate("Telegram button")
@@ -248,6 +269,12 @@ jobs:
                   extend(30)
               elif text == "/keep60":
                   extend(60)
+              elif text == "/keep120":
+                  extend(120)
+              elif text == "/keep180":
+                  extend(180)
+              elif text == "/keep240":
+                  extend(240)
               elif text == "/shutdown":
                   deallocate("Telegram command")
               elif text == "/help":
@@ -256,6 +283,9 @@ jobs:
                       "/status - current VM status and planned shutdown\n"
                       "/keep30 - extend shutdown by 30 minutes\n"
                       "/keep60 - extend shutdown by 1 hour\n"
+                      "/keep120 - extend shutdown by 2 hours\n"
+                      "/keep180 - extend shutdown by 3 hours\n"
+                      "/keep240 - extend shutdown by 4 hours\n"
                       "/shutdown - deallocate now"
                   )
 
@@ -266,7 +296,8 @@ jobs:
           set_tags(
               RunUntilEpoch=deadline,
               RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
-              WarningForEpoch=0
+              WarningForEpoch=0,
+              LastPowerState="running"
           )
 
           send(
