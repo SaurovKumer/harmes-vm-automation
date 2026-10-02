@@ -249,6 +249,145 @@ jobs:
                   f"ℹ️ Azure cost data may arrive with a delay."
               )
 
+          def balance_message():
+              # Best-effort exact Azure credit balance lookup.
+              # This uses Azure Billing + Consumption APIs with the same OIDC login;
+              # no extra API key is required. Billing-level read access may still be needed.
+              def rest_json(url):
+                  p = subprocess.run(
+                      ["az", "rest", "--method", "get", "--url", url, "-o", "json"],
+                      text=True,
+                      capture_output=True
+                  )
+                  if p.returncode != 0:
+                      return False, None, (p.stderr or p.stdout or "").strip()
+                  try:
+                      return True, json.loads(p.stdout or "{}"), ""
+                  except Exception as e:
+                      return False, None, f"Could not parse Azure response: {e}"
+
+              ok, accounts_data, accounts_err = rest_json(
+                  "https://management.azure.com/providers/Microsoft.Billing/billingAccounts"
+                  "?api-version=2024-04-01"
+              )
+
+              if not ok:
+                  return (
+                      "💳 Azure credit balance\n"
+                      "❌ Exact balance is unavailable with the current GitHub Azure identity.\n"
+                      "The app likely needs billing-level read access.\n"
+                      "Your VM control and /cost commands are unaffected."
+                  )
+
+              accounts = (accounts_data or {}).get("value", [])
+              if not accounts:
+                  return (
+                      "💳 Azure credit balance\n"
+                      "❌ No accessible billing account was returned for the GitHub Azure identity.\n"
+                      "Your Azure for Students credit can still exist, but this identity cannot read it."
+                  )
+
+              errors = []
+
+              for account in accounts:
+                  account_name = str(account.get("name") or "").strip()
+                  if not account_name:
+                      continue
+
+                  account_props = account.get("properties") or {}
+                  display_name = (
+                      account_props.get("displayName")
+                      or account_props.get("agreementType")
+                      or "Azure billing account"
+                  )
+
+                  # The credit summary endpoint is billing-profile scoped.
+                  okp, profiles_data, profiles_err = rest_json(
+                      "https://management.azure.com/providers/Microsoft.Billing/billingAccounts/"
+                      f"{urllib.parse.quote(account_name, safe=':_-')}/billingProfiles"
+                      "?api-version=2024-04-01"
+                  )
+
+                  if not okp:
+                      errors.append(profiles_err)
+                      continue
+
+                  profiles = (profiles_data or {}).get("value", [])
+
+                  for profile in profiles:
+                      profile_name = str(profile.get("name") or "").strip()
+                      if not profile_name:
+                          continue
+
+                      url = (
+                          "https://management.azure.com/providers/Microsoft.Billing/billingAccounts/"
+                          f"{urllib.parse.quote(account_name, safe=':_-')}/billingProfiles/"
+                          f"{urllib.parse.quote(profile_name, safe=':_-')}"
+                          "/providers/Microsoft.Consumption/credits/balanceSummary"
+                          "?api-version=2026-06-01"
+                      )
+
+                      okc, credit_data, credit_err = rest_json(url)
+
+                      if not okc:
+                          errors.append(credit_err)
+                          continue
+
+                      props = (credit_data or {}).get("properties") or {}
+                      summary = props.get("balanceSummary") or {}
+                      current = summary.get("currentBalance") or {}
+                      estimated = summary.get("estimatedBalance") or {}
+
+                      current_value = current.get("value")
+                      current_currency = current.get("currency") or props.get("creditCurrency") or "USD"
+                      estimated_value = estimated.get("value")
+                      estimated_currency = estimated.get("currency") or current_currency
+                      is_estimated = bool(props.get("isEstimatedBalance", False))
+
+                      if current_value is None and estimated_value is None:
+                          continue
+
+                      lines = [
+                          "💳 Azure credit balance",
+                          f"Billing account: {display_name}",
+                      ]
+
+                      if current_value is not None:
+                          try:
+                              current_value = float(current_value)
+                              lines.append(
+                                  f"Remaining credit: {current_value:.2f} {current_currency}"
+                              )
+                          except Exception:
+                              lines.append(
+                                  f"Remaining credit: {current_value} {current_currency}"
+                              )
+
+                      if estimated_value is not None:
+                          try:
+                              estimated_value = float(estimated_value)
+                              lines.append(
+                                  f"Estimated balance: {estimated_value:.2f} {estimated_currency}"
+                              )
+                          except Exception:
+                              lines.append(
+                                  f"Estimated balance: {estimated_value} {estimated_currency}"
+                              )
+
+                      if is_estimated:
+                          lines.append("ℹ️ Azure marks this balance as estimated.")
+
+                      lines.append("ℹ️ Balance data can lag behind recent usage.")
+                      return "\n".join(lines)
+
+              return (
+                  "💳 Azure credit balance\n"
+                  "❌ Azure did not expose a readable credit balance for this billing account.\n"
+                  "This is common when the GitHub service principal has VM/resource access "
+                  "but not billing-profile access.\n"
+                  "Your /cost commands can still work separately."
+              )
+
           def dhaka_text(epoch):
               return datetime.fromtimestamp(int(epoch), DHAKA).strftime("%Y-%m-%d %I:%M %p")
 
@@ -460,6 +599,10 @@ jobs:
                   send(cost_message(cost_days[text]))
                   return
 
+              if text == "/balance":
+                  send(balance_message())
+                  return
+
               if text == "/status":
                   send(status_message())
               elif text == "/startvm":
@@ -480,6 +623,7 @@ jobs:
                   send(
                       "Commands:\n"
                       "/status - show VM status, deallocation, and auto-start time\n"
+                      "/balance - show Azure credit balance when billing access allows it\n"
                       "/cost1d - cost for last 1 day\n"
                       "/cost2d - cost for last 2 days\n"
                       "/cost3d - cost for last 3 days\n"
@@ -503,6 +647,7 @@ jobs:
               tg("setMyCommands", {
                   "commands": json.dumps([
                       {"command": "status", "description": "VM status, deallocation and auto-start"},
+                      {"command": "balance", "description": "Azure remaining credit balance"},
                       {"command": "cost1d", "description": "Cost for last 1 day"},
                       {"command": "cost2d", "description": "Cost for last 2 days"},
                       {"command": "cost3d", "description": "Cost for last 3 days"},
