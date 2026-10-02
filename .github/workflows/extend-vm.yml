@@ -80,39 +80,38 @@ jobs:
           from zoneinfo import ZoneInfo
 
           dhaka = ZoneInfo("Asia/Dhaka")
-          utc = ZoneInfo("UTC")
-
           now = datetime.now(dhaka)
-          hour, minute = map(int, os.environ["TARGET_TIME"].split(":"))
 
+          hour, minute = map(int, os.environ["TARGET_TIME"].split(":"))
           target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
           if target <= now:
               target += timedelta(days=1)
 
-          target_utc = target.astimezone(utc)
-
           epoch = int(target.timestamp())
           local_text = target.strftime("%Y-%m-%d %H:%M")
-          utc_hhmm = target_utc.strftime("%H%M")
 
           print("Current Dhaka time:", now.strftime("%Y-%m-%d %H:%M:%S"))
-          print("Shutdown Dhaka time:", local_text)
-          print("Azure auto-shutdown UTC:", utc_hhmm)
+          print("Requested shutdown:", local_text)
 
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"epoch={epoch}\n")
               f.write(f"local={local_text}\n")
-              f.write(f"utc_hhmm={utc_hhmm}\n")
           PY
 
-      - name: Save extension and update Azure auto-shutdown
+      - name: Save extension
         shell: bash
         run: |
           VM_ID=$(az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" --query id -o tsv)
 
-          az tag update             --resource-id "$VM_ID"             --operation Merge             --tags               RunUntilEpoch="${{ steps.calc.outputs.epoch }}"               RunUntilLocal="${{ steps.calc.outputs.local }}"
+          az tag update \
+            --resource-id "$VM_ID" \
+            --operation Merge \
+            --tags \
+              RunUntilEpoch="${{ steps.calc.outputs.epoch }}" \
+              RunUntilLocal="${{ steps.calc.outputs.local }}"
 
-          az vm auto-shutdown             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --time "${{ steps.calc.outputs.utc_hhmm }}"
-
-          echo "VM extension saved."
-          echo "VM can run until ${{ steps.calc.outputs.local }} Bangladesh time."
+          echo "Extension saved."
+          echo "The 09:00/22:00 scheduled shutdown will be skipped while this time is in the future."
+          echo "A GitHub check runs every 5 minutes and will deallocate the VM after:"
+          echo "${{ steps.calc.outputs.local }} Bangladesh time."
