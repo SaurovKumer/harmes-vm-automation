@@ -102,10 +102,10 @@ GitHub stores the source code. Cloudflare Git integration automatically deploys 
 ## Important files
 
 ```text
-cloudflare-worker/
-├── src/
-│   └── index.js
-└── wrangler.toml
+README.md
+src/
+└── index.js
+wrangler.toml
 ```
 
 Current `wrangler.toml` contains:
@@ -272,7 +272,7 @@ Recommended deployment settings:
 
 ```text
 Production branch: main
-Root directory: cloudflare-worker
+Root directory: repository root / leave blank
 Build command: leave empty
 Deploy command: npx wrangler deploy
 ```
@@ -732,7 +732,7 @@ You also do not need to call `setWebhook` after every code deployment. The webho
 
 # Legacy GitHub Actions
 
-Older GitHub Actions workflow files may still exist in the repository from the previous architecture.
+The legacy GitHub Actions workflow files have been removed from the active branch.
 
 The current intended runtime is:
 
@@ -740,7 +740,7 @@ The current intended runtime is:
 Cloudflare Worker + Telegram webhook + Azure API
 ```
 
-After the Cloudflare version has been fully verified, legacy scheduled GitHub workflows should be disabled or removed to avoid duplicate VM automation.
+The active runtime is Cloudflare Worker + Telegram webhook + Azure API; GitHub is used only for source control and Cloudflare deployment.
 
 ---
 
