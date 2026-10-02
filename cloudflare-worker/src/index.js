@@ -843,10 +843,7 @@ async function costMessage(env, days) {
   }
 }
 
-async function queryTotalCostForScope(env, scope, days = 365) {
-  const end = new Date();
-  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
-
+async function queryCostRange(env, scope, start, end) {
   const body = {
     type: "Usage",
     timeframe: "Custom",
@@ -899,8 +896,64 @@ async function queryTotalCostForScope(env, scope, days = 365) {
   return { total, currency };
 }
 
+async function queryTotalCostForScope(env, scope, creditStartDate) {
+  const start = new Date(`${creditStartDate}T00:00:00.000Z`);
+  const end = new Date();
+
+  if (Number.isNaN(start.getTime())) {
+    throw new Error("AZURE_CREDIT_START_DATE must use YYYY-MM-DD format.");
+  }
+
+  if (start > end) {
+    throw new Error("AZURE_CREDIT_START_DATE cannot be in the future.");
+  }
+
+  // Azure Cost Management rejects custom ranges longer than one year.
+  // Split the credit period into chunks safely below that limit.
+  const maxChunkMs = 364 * 24 * 60 * 60 * 1000;
+
+  let cursor = new Date(start);
+  let total = 0;
+  let currency = "USD";
+
+  while (cursor < end) {
+    const chunkEnd = new Date(
+      Math.min(cursor.getTime() + maxChunkMs, end.getTime())
+    );
+
+    const part = await queryCostRange(env, scope, cursor, chunkEnd);
+    total += Number(part?.total || 0);
+
+    if (part?.currency) {
+      const partCurrency = String(part.currency).toUpperCase();
+
+      if (currency !== "USD" && partCurrency !== currency) {
+        throw new Error("Azure returned mixed currencies across cost periods.");
+      }
+
+      currency = partCurrency;
+    }
+
+    if (chunkEnd.getTime() >= end.getTime()) break;
+
+    // Move forward by 1 ms so adjacent chunks do not overlap.
+    cursor = new Date(chunkEnd.getTime() + 1);
+  }
+
+  return { total, currency };
+}
+
 async function balanceMessage(env) {
   const initialCredit = Number(env.AZURE_INITIAL_CREDIT || 100);
+  const creditStartDate = String(env.AZURE_CREDIT_START_DATE || "").trim();
+
+  if (!creditStartDate) {
+    return (
+      "💳 Azure for Students — estimated balance\n" +
+      "❌ AZURE_CREDIT_START_DATE is not configured."
+    );
+  }
+
   const subscriptionScope = `/subscriptions/${env.AZURE_SUBSCRIPTION_ID}`;
   const resourceGroupScope =
     `/subscriptions/${env.AZURE_SUBSCRIPTION_ID}/resourceGroups/${env.RESOURCE_GROUP}`;
@@ -910,10 +963,18 @@ async function balanceMessage(env) {
   let limitedScope = false;
 
   try {
-    result = await queryTotalCostForScope(env, subscriptionScope, 365);
+    result = await queryTotalCostForScope(
+      env,
+      subscriptionScope,
+      creditStartDate
+    );
   } catch (subscriptionErr) {
     try {
-      result = await queryTotalCostForScope(env, resourceGroupScope, 365);
+      result = await queryTotalCostForScope(
+        env,
+        resourceGroupScope,
+        creditStartDate
+      );
       scopeLabel = env.RESOURCE_GROUP;
       limitedScope = true;
     } catch (resourceGroupErr) {
@@ -943,8 +1004,9 @@ async function balanceMessage(env) {
     `Estimated remaining: ${formatMoney(remaining)} USD`,
     `Estimated used: ${formatMoney(used)} USD`,
     `Initial credit: ${formatMoney(initialCredit)} USD`,
+    `Credit start date: ${creditStartDate}`,
     `Cost scope: ${scopeLabel}`,
-    "ℹ️ Estimate = initial credit − Azure Cost Management usage from the last 365 days."
+    "ℹ️ Estimate = initial credit − Azure Cost Management usage since the credit start date."
   ];
 
   if (limitedScope) {
