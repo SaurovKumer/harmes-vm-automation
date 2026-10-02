@@ -844,92 +844,93 @@ async function costMessage(env, days) {
 }
 
 async function balanceMessage(env) {
+  // Azure for Students credit appears in the Azure "Benefits" experience.
+  // Prefer the BillingBenefits subscription endpoint because it exposes
+  // credit amount + consumed amount directly for accessible credit resources.
   try {
-    const { data: accountsData } = await azureRequest(
+    const { data } = await azureRequest(
       env,
       "GET",
-      `/providers/Microsoft.Billing/billingAccounts?api-version=${BILLING_API}`
+      `/subscriptions/${env.AZURE_SUBSCRIPTION_ID}/providers/Microsoft.BillingBenefits/credits?api-version=${CREDIT_API}`
     );
 
-    const accounts = accountsData?.value || [];
-    if (!accounts.length) {
+    const credits = Array.isArray(data?.value) ? data.value : [];
+
+    if (credits.length) {
+      let totalCredit = 0;
+      let totalConsumed = 0;
+      let currency = "USD";
+      let foundAmounts = false;
+      const names = [];
+
+      for (const item of credits) {
+        const props = item?.properties || {};
+        const credit = props.credit || {};
+        const consumed = props.consumed || {};
+
+        const amount = Number(credit.amount);
+        const used = Number(consumed.amount || 0);
+
+        if (Number.isFinite(amount)) {
+          foundAmounts = true;
+          totalCredit += amount;
+          totalConsumed += Number.isFinite(used) ? used : 0;
+          currency =
+            credit.currencyCode ||
+            consumed.currencyCode ||
+            currency;
+
+          if (props.displayName) {
+            names.push(String(props.displayName));
+          }
+        }
+      }
+
+      if (foundAmounts) {
+        const remaining = Math.max(0, totalCredit - totalConsumed);
+        const lines = [
+          "💳 Azure credit balance",
+          `Remaining credit: ${formatMoney(remaining)} ${currency}`,
+          `Used credit: ${formatMoney(totalConsumed)} ${currency}`,
+          `Total credit: ${formatMoney(totalCredit)} ${currency}`
+        ];
+
+        if (names.length === 1) {
+          lines.push(`Benefit: ${names[0]}`);
+        }
+
+        lines.push("ℹ️ Azure benefit data can lag behind recent usage.");
+        return lines.join("\n");
+      }
+    }
+
+    return (
+      "💳 Azure credit balance\n" +
+      "❌ No readable Azure credit resource was returned for this subscription.\n" +
+      "Give the Cloudflare Azure application Reader access at the subscription scope, then try /balance again."
+    );
+  } catch (err) {
+    const msg = String(err?.message || err || "");
+
+    if (msg.includes("403") || msg.toLowerCase().includes("authorization")) {
       return (
         "💳 Azure credit balance\n" +
-        "❌ No accessible billing account was returned.\n" +
-        "The Azure application may not have billing-level read access."
+        "❌ The Cloudflare Azure application cannot read subscription credit benefits yet.\n" +
+        "Add the Reader role to the same Azure app at the subscription scope, then try /balance again."
       );
     }
 
-    for (const account of accounts) {
-      const accountName = String(account?.name || "");
-      if (!accountName) continue;
-
-      let profiles;
-      try {
-        const { data } = await azureRequest(
-          env,
-          "GET",
-          `/providers/Microsoft.Billing/billingAccounts/${encodeURIComponent(accountName)}/billingProfiles?api-version=${BILLING_API}`
-        );
-        profiles = data?.value || [];
-      } catch {
-        continue;
-      }
-
-      for (const profile of profiles) {
-        const profileName = String(profile?.name || "");
-        if (!profileName) continue;
-
-        try {
-          const { data } = await azureRequest(
-            env,
-            "GET",
-            `/providers/Microsoft.Billing/billingAccounts/${encodeURIComponent(accountName)}/billingProfiles/${encodeURIComponent(profileName)}/providers/Microsoft.Consumption/credits/balanceSummary?api-version=${CREDIT_API}`
-          );
-
-          const props = data?.properties || {};
-          const summary = props.balanceSummary || {};
-          const current = summary.currentBalance || {};
-          const estimated = summary.estimatedBalance || {};
-
-          if (current.value == null && estimated.value == null) continue;
-
-          const lines = ["💳 Azure credit balance"];
-
-          if (current.value != null) {
-            lines.push(
-              `Remaining credit: ${formatMoney(current.value)} ${current.currency || props.creditCurrency || "USD"}`
-            );
-          }
-
-          if (estimated.value != null) {
-            lines.push(
-              `Estimated balance: ${formatMoney(estimated.value)} ${estimated.currency || current.currency || "USD"}`
-            );
-          }
-
-          if (props.isEstimatedBalance) {
-            lines.push("ℹ️ Azure marks this balance as estimated.");
-          }
-
-          lines.push("ℹ️ Balance data can lag behind recent usage.");
-          return lines.join("\n");
-        } catch {
-          continue;
-        }
-      }
+    if (msg.includes("404") || msg.toLowerCase().includes("notfound")) {
+      return (
+        "💳 Azure credit balance\n" +
+        "❌ Azure Billing Benefits did not return a credit resource for this subscription.\n" +
+        "Your credit is still visible in Azure Portal > Benefits."
+      );
     }
 
     return (
       "💳 Azure credit balance\n" +
-      "❌ Azure did not expose a readable credit balance for this billing account.\n" +
-      "VM control and cost commands can still work normally."
-    );
-  } catch (err) {
-    return (
-      "💳 Azure credit balance\n" +
-      "❌ Exact balance is unavailable with the current Azure application.\n" +
-      "Billing-level read access may be required."
+      `❌ Balance query failed: ${shortError(err)}`
     );
   }
 }
