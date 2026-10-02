@@ -1,0 +1,333 @@
+name: Telegram VM Status & Safety Monitor
+
+on:
+  schedule:
+    # GitHub's minimum scheduled interval is 5 minutes.
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: harmes-vm-telegram-monitor
+  cancel-in-progress: false
+
+env:
+  RESOURCE_GROUP: harmes-vm_group
+  VM_NAME: harmes-vm
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Process Telegram commands and enforce shutdown
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import json
+          import os
+          import subprocess
+          import time
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          RG = os.environ["RESOURCE_GROUP"]
+          VM = os.environ["VM_NAME"]
+          TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+          CHAT_ID = str(os.environ["TELEGRAM_CHAT_ID"])
+          DHAKA = ZoneInfo("Asia/Dhaka")
+          API = f"https://api.telegram.org/bot{TOKEN}"
+
+          def az(*args, check=True):
+              p = subprocess.run(["az", *args], text=True, capture_output=True)
+              if check and p.returncode != 0:
+                  print(p.stdout)
+                  print(p.stderr)
+                  raise SystemExit(p.returncode)
+              return p.stdout.strip()
+
+          def vm_id():
+              return az("vm", "show", "-g", RG, "-n", VM, "--query", "id", "-o", "tsv")
+
+          def tags():
+              raw = az("vm", "show", "-g", RG, "-n", VM, "--query", "tags", "-o", "json")
+              try:
+                  return json.loads(raw or "{}") or {}
+              except Exception:
+                  return {}
+
+          def set_tags(**values):
+              args = ["tag", "update", "--resource-id", vm_id(), "--operation", "Merge", "--tags"]
+              args.extend([f"{k}={v}" for k, v in values.items()])
+              az(*args)
+
+          def power_state():
+              out = az(
+                  "vm", "get-instance-view",
+                  "-g", RG, "-n", VM,
+                  "--query", "instanceView.statuses[?starts_with(code, 'PowerState/')].displayStatus | [0]",
+                  "-o", "tsv",
+                  check=False
+              )
+              return out or "Unknown"
+
+          def is_running():
+              return "running" in power_state().lower()
+
+          def tg(method, payload=None, timeout=20):
+              data = urllib.parse.urlencode(payload or {}).encode()
+              req = urllib.request.Request(f"{API}/{method}", data=data)
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  return json.load(r)
+
+          def send(text, keyboard=None):
+              payload = {"chat_id": CHAT_ID, "text": text}
+              if keyboard is not None:
+                  payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
+              try:
+                  tg("sendMessage", payload)
+              except Exception as e:
+                  print("Telegram send failed:", e)
+
+          def answer_callback(callback_id, text):
+              try:
+                  tg("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+              except Exception as e:
+                  print("Callback answer failed:", e)
+
+          def current_deadline():
+              t = tags()
+              try:
+                  return int(t.get("RunUntilEpoch", "0") or 0)
+              except Exception:
+                  return 0
+
+          def dhaka_text(epoch):
+              return datetime.fromtimestamp(int(epoch), DHAKA).strftime("%Y-%m-%d %I:%M %p")
+
+          def remaining_text(epoch):
+              sec = max(0, int(epoch) - int(time.time()))
+              h, rem = divmod(sec, 3600)
+              m = rem // 60
+              return f"{h}h {m}m" if h else f"{m}m"
+
+          def status_message():
+              state = power_state()
+              deadline = current_deadline()
+              if deadline > int(time.time()):
+                  return (
+                      f"🖥 {VM}\n"
+                      f"Status: {state}\n"
+                      f"⏳ Planned deallocation: {dhaka_text(deadline)}\n"
+                      f"⌛ Remaining: {remaining_text(deadline)}"
+                  )
+              return (
+                  f"🖥 {VM}\n"
+                  f"Status: {state}\n"
+                  f"⏳ Planned deallocation: not currently set"
+              )
+
+          def warning_keyboard(deadline):
+              d = str(deadline)
+              return [
+                  [
+                      {"text": "⏱ +30 min", "callback_data": f"keep30|{d}"},
+                      {"text": "⏱ +1 hour", "callback_data": f"keep60|{d}"}
+                  ],
+                  [
+                      {"text": "📊 Status", "callback_data": f"status|{d}"},
+                      {"text": "🛑 Shutdown now", "callback_data": f"shutdown|{d}"}
+                  ]
+              ]
+
+          def send_warning(deadline):
+              set_tags(WarningForEpoch=deadline)
+              send(
+                  f"⚠️ {VM} will be deallocated in about 5 minutes.\n"
+                  f"Scheduled: {dhaka_text(deadline)}\n\n"
+                  f"No response = automatic shutdown.",
+                  warning_keyboard(deadline)
+              )
+
+          def deallocate(reason):
+              az("vm", "deallocate", "-g", RG, "-n", VM, "--no-wait")
+              set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+              send(f"🛑 {VM}: deallocation requested.\nReason: {reason}")
+
+          def extend(minutes):
+              now = int(time.time())
+              old = current_deadline()
+              base = old if old > now else now
+              new_deadline = base + minutes * 60
+              set_tags(
+                  RunUntilEpoch=new_deadline,
+                  RunUntilLocal=datetime.fromtimestamp(new_deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
+                  WarningForEpoch=0
+              )
+              send(
+                  f"✅ {VM} extended by {minutes} minutes.\n"
+                  f"New planned deallocation: {dhaka_text(new_deadline)}"
+              )
+
+          def start_vm():
+              az("vm", "start", "-g", RG, "-n", VM)
+              deadline = int(time.time()) + 30 * 60
+              set_tags(
+                  RunUntilEpoch=deadline,
+                  RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
+                  WarningForEpoch=0
+              )
+              send(
+                  f"🟢 {VM} started from Telegram.\n"
+                  f"Automatic deallocation: {dhaka_text(deadline)}"
+              )
+
+          def process_update(update):
+              cq = update.get("callback_query")
+              if cq:
+                  msg = cq.get("message") or {}
+                  chat = msg.get("chat") or {}
+                  if str(chat.get("id")) != CHAT_ID:
+                      return
+                  data = cq.get("data", "")
+                  callback_id = cq.get("id")
+                  parts = data.split("|", 1)
+                  action = parts[0]
+                  expected = int(parts[1]) if len(parts) == 2 and parts[1].isdigit() else 0
+                  current = current_deadline()
+
+                  if action != "status" and expected and current != expected:
+                      answer_callback(callback_id, "This button has expired.")
+                      return
+
+                  if action == "keep30":
+                      answer_callback(callback_id, "Extended +30 minutes")
+                      extend(30)
+                  elif action == "keep60":
+                      answer_callback(callback_id, "Extended +1 hour")
+                      extend(60)
+                  elif action == "shutdown":
+                      answer_callback(callback_id, "Shutting down")
+                      deallocate("Telegram button")
+                  elif action == "status":
+                      answer_callback(callback_id, "Status sent")
+                      send(status_message())
+                  return
+
+              msg = update.get("message") or {}
+              chat = msg.get("chat") or {}
+              if str(chat.get("id")) != CHAT_ID:
+                  return
+              text = (msg.get("text") or "").strip().split("@", 1)[0].lower()
+
+              if text == "/status":
+                  send(status_message())
+              elif text == "/startvm":
+                  start_vm()
+              elif text == "/keep30":
+                  extend(30)
+              elif text == "/keep60":
+                  extend(60)
+              elif text == "/shutdown":
+                  deallocate("Telegram command")
+              elif text == "/help":
+                  send(
+                      "Commands:\n"
+                      "/status - show current VM state and planned shutdown\n"
+                      "/startvm - start VM with a 30-minute timer\n"
+                      "/keep30 - add 30 minutes\n"
+                      "/keep60 - add 1 hour\n"
+                      "/shutdown - deallocate now\n"
+                      "/help - show commands"
+                  )
+
+          # Keep Telegram's command menu useful.
+          try:
+              tg("setMyCommands", {
+                  "commands": json.dumps([
+                      {"command": "status", "description": "VM status and shutdown time"},
+                      {"command": "startvm", "description": "Start VM for 30 minutes"},
+                      {"command": "keep30", "description": "Extend by 30 minutes"},
+                      {"command": "keep60", "description": "Extend by 1 hour"},
+                      {"command": "shutdown", "description": "Deallocate VM now"},
+                      {"command": "help", "description": "Show commands"}
+                  ])
+              })
+          except Exception as e:
+              print("setMyCommands failed:", e)
+
+          # Process all currently queued bot updates, then acknowledge them.
+          max_update = None
+          try:
+              result = tg("getUpdates", {
+                  "timeout": 0,
+                  "allowed_updates": json.dumps(["message", "callback_query"])
+              })
+              for upd in result.get("result", []):
+                  max_update = max(max_update or upd["update_id"], upd["update_id"])
+                  process_update(upd)
+
+              if max_update is not None:
+                  # Confirm everything through max_update so the same command is not repeated.
+                  tg("getUpdates", {"offset": int(max_update) + 1, "timeout": 0})
+          except Exception as e:
+              print("Telegram update processing issue:", e)
+
+          state = power_state()
+          now = int(time.time())
+          deadline = current_deadline()
+
+          # If the VM was started outside GitHub/Telegram, detect it and attach
+          # a default 30-minute safety timer.
+          if "running" in state.lower() and deadline <= 0:
+              deadline = now + 30 * 60
+              set_tags(
+                  RunUntilEpoch=deadline,
+                  RunUntilLocal=datetime.fromtimestamp(deadline, DHAKA).strftime("%Y-%m-%d_%H:%M"),
+                  WarningForEpoch=0
+              )
+              send(
+                  f"🟢 External VM start detected.\n"
+                  f"A 30-minute safety timer was attached.\n"
+                  f"Planned deallocation: {dhaka_text(deadline)}"
+              )
+
+          # Re-read after command processing/detection.
+          state = power_state()
+          now = int(time.time())
+          t = tags()
+          try:
+              deadline = int(t.get("RunUntilEpoch", "0") or 0)
+          except Exception:
+              deadline = 0
+          warned_for = str(t.get("WarningForEpoch", "0"))
+
+          if "running" in state.lower() and deadline > 0:
+              remaining = deadline - now
+
+              if remaining <= 0:
+                  deallocate("Safety timer expired")
+              elif remaining <= 300 and warned_for != str(deadline):
+                  send_warning(deadline)
+
+          elif "deallocated" in state.lower() and deadline > 0:
+              set_tags(RunUntilEpoch=0, RunUntilLocal="none", WarningForEpoch=0)
+
+          print(status_message())
+          PY
