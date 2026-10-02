@@ -44,7 +44,7 @@ jobs:
           import time
           import urllib.parse
           import urllib.request
-          from datetime import datetime
+          from datetime import datetime, timedelta, timezone
           from zoneinfo import ZoneInfo
 
           RG = os.environ["RESOURCE_GROUP"]
@@ -144,6 +144,110 @@ jobs:
                   return dt.strftime("%I:%M %p")
               except Exception:
                   return hhmm
+
+          def cost_message(days):
+              # Cost data is queried for this VM's resource group.
+              # Azure Cost Management data can be delayed, so this is the
+              # latest available cost, not a real-time meter.
+              subscription_id = az("account", "show", "--query", "id", "-o", "tsv")
+              end = datetime.now(timezone.utc)
+              start = end - timedelta(days=days)
+
+              body = {
+                  "type": "Usage",
+                  "timeframe": "Custom",
+                  "timePeriod": {
+                      "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                      "to": end.strftime("%Y-%m-%dT%H:%M:%SZ")
+                  },
+                  "dataset": {
+                      "granularity": "None",
+                      "aggregation": {
+                          "totalCost": {
+                              "name": "PreTaxCost",
+                              "function": "Sum"
+                          }
+                      }
+                  }
+              }
+
+              url = (
+                  f"https://management.azure.com/subscriptions/{subscription_id}"
+                  f"/resourceGroups/{RG}/providers/Microsoft.CostManagement/query"
+                  f"?api-version=2026-06-01"
+              )
+
+              p = subprocess.run(
+                  [
+                      "az", "rest",
+                      "--method", "post",
+                      "--url", url,
+                      "--headers", "Content-Type=application/json",
+                      "--body", json.dumps(body),
+                      "-o", "json"
+                  ],
+                  text=True,
+                  capture_output=True
+              )
+
+              if p.returncode != 0:
+                  err = (p.stderr or p.stdout or "").strip()
+                  short = err[-700:] if err else "Unknown Azure Cost Management error."
+                  return (
+                      f"❌ Cost query failed for the last {days} day(s).\n"
+                      f"The GitHub Azure identity may need Cost Management Reader permission.\n\n"
+                      f"Azure response:\n{short}"
+                  )
+
+              try:
+                  data = json.loads(p.stdout or "{}")
+                  props = data.get("properties", {})
+                  columns = props.get("columns", [])
+                  rows = props.get("rows", [])
+              except Exception as e:
+                  return f"❌ Could not parse Azure cost data: {e}"
+
+              if not rows:
+                  return (
+                      f"💰 Cost — last {days} day(s)\n"
+                      f"Resource group: {RG}\n"
+                      f"No cost data is available yet for this period."
+                  )
+
+              names = [str(c.get("name", "")) for c in columns]
+              lower = [n.lower() for n in names]
+
+              cost_idx = None
+              for candidate in ("pretaxcost", "totalcost", "cost"):
+                  if candidate in lower:
+                      cost_idx = lower.index(candidate)
+                      break
+
+              currency_idx = lower.index("currency") if "currency" in lower else None
+
+              if cost_idx is None:
+                  return (
+                      f"❌ Azure returned cost data, but no cost column was found.\n"
+                      f"Columns: {', '.join(names)}"
+                  )
+
+              total = 0.0
+              currencies = set()
+              for row in rows:
+                  try:
+                      total += float(row[cost_idx] or 0)
+                  except Exception:
+                      pass
+                  if currency_idx is not None and len(row) > currency_idx and row[currency_idx]:
+                      currencies.add(str(row[currency_idx]))
+
+              currency = ", ".join(sorted(currencies)) if currencies else "currency unavailable"
+              return (
+                  f"💰 Cost — last {days} day(s)\n"
+                  f"Scope: {RG}\n"
+                  f"Latest available cost: {total:.4f} {currency}\n"
+                  f"ℹ️ Azure cost data may arrive with a delay."
+              )
 
           def dhaka_text(epoch):
               return datetime.fromtimestamp(int(epoch), DHAKA).strftime("%Y-%m-%d %I:%M %p")
@@ -344,6 +448,18 @@ jobs:
                   )
                   return
 
+              cost_days = {
+                  "/cost1d": 1,
+                  "/cost2d": 2,
+                  "/cost3d": 3,
+                  "/cost7d": 7,
+                  "/cost30d": 30,
+              }
+
+              if text in cost_days:
+                  send(cost_message(cost_days[text]))
+                  return
+
               if text == "/status":
                   send(status_message())
               elif text == "/startvm":
@@ -364,6 +480,11 @@ jobs:
                   send(
                       "Commands:\n"
                       "/status - show VM status, deallocation, and auto-start time\n"
+                      "/cost1d - cost for last 1 day\n"
+                      "/cost2d - cost for last 2 days\n"
+                      "/cost3d - cost for last 3 days\n"
+                      "/cost7d - cost for last 7 days\n"
+                      "/cost30d - cost for last 30 days\n"
                       "/autostart HH:MM - set daily auto-start (Bangladesh time)\n"
                       "/autostart off - disable daily auto-start\n"
                       "/startvm - start VM with a 30-minute timer\n"
@@ -382,6 +503,11 @@ jobs:
               tg("setMyCommands", {
                   "commands": json.dumps([
                       {"command": "status", "description": "VM status, deallocation and auto-start"},
+                      {"command": "cost1d", "description": "Cost for last 1 day"},
+                      {"command": "cost2d", "description": "Cost for last 2 days"},
+                      {"command": "cost3d", "description": "Cost for last 3 days"},
+                      {"command": "cost7d", "description": "Cost for last 7 days"},
+                      {"command": "cost30d", "description": "Cost for last 30 days"},
                       {"command": "autostart", "description": "Set daily auto-start: /autostart HH:MM"},
                       {"command": "startvm", "description": "Start VM for 30 minutes"},
                       {"command": "keep30", "description": "Extend by 30 minutes"},
