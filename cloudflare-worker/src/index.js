@@ -843,96 +843,119 @@ async function costMessage(env, days) {
   }
 }
 
+async function queryTotalCostForScope(env, scope, days = 365) {
+  const end = new Date();
+  const start = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+
+  const body = {
+    type: "Usage",
+    timeframe: "Custom",
+    timePeriod: {
+      from: start.toISOString(),
+      to: end.toISOString()
+    },
+    dataset: {
+      granularity: "None",
+      aggregation: {
+        totalCost: {
+          name: "PreTaxCost",
+          function: "Sum"
+        }
+      }
+    }
+  };
+
+  const url =
+    `${ARM}${scope}/providers/Microsoft.CostManagement/query?api-version=${COST_API}`;
+
+  const data = await queryCostWithRetry(env, url, body);
+  const columns = data?.properties?.columns || [];
+  const rows = data?.properties?.rows || [];
+
+  if (!rows.length) {
+    return { total: 0, currency: "USD" };
+  }
+
+  const names = columns.map((col) => String(col?.name || "").toLowerCase());
+  const costIndex = ["pretaxcost", "totalcost", "cost"]
+    .map((name) => names.indexOf(name))
+    .find((index) => index >= 0);
+  const currencyIndex = names.indexOf("currency");
+
+  if (costIndex === undefined || costIndex < 0) {
+    throw new Error("Azure returned cost data without a recognized cost column.");
+  }
+
+  let total = 0;
+  let currency = "USD";
+
+  for (const row of rows) {
+    total += Number(row[costIndex] || 0);
+    if (currencyIndex >= 0 && row[currencyIndex]) {
+      currency = String(row[currencyIndex]);
+    }
+  }
+
+  return { total, currency };
+}
+
 async function balanceMessage(env) {
-  // Azure for Students credit appears in the Azure "Benefits" experience.
-  // Prefer the BillingBenefits subscription endpoint because it exposes
-  // credit amount + consumed amount directly for accessible credit resources.
+  const initialCredit = Number(env.AZURE_INITIAL_CREDIT || 100);
+  const subscriptionScope = `/subscriptions/${env.AZURE_SUBSCRIPTION_ID}`;
+  const resourceGroupScope =
+    `/subscriptions/${env.AZURE_SUBSCRIPTION_ID}/resourceGroups/${env.RESOURCE_GROUP}`;
+
+  let result;
+  let scopeLabel = "Entire subscription";
+  let limitedScope = false;
+
   try {
-    const { data } = await azureRequest(
-      env,
-      "GET",
-      `/subscriptions/${env.AZURE_SUBSCRIPTION_ID}/providers/Microsoft.BillingBenefits/credits?api-version=${CREDIT_API}`
-    );
-
-    const credits = Array.isArray(data?.value) ? data.value : [];
-
-    if (credits.length) {
-      let totalCredit = 0;
-      let totalConsumed = 0;
-      let currency = "USD";
-      let foundAmounts = false;
-      const names = [];
-
-      for (const item of credits) {
-        const props = item?.properties || {};
-        const credit = props.credit || {};
-        const consumed = props.consumed || {};
-
-        const amount = Number(credit.amount);
-        const used = Number(consumed.amount || 0);
-
-        if (Number.isFinite(amount)) {
-          foundAmounts = true;
-          totalCredit += amount;
-          totalConsumed += Number.isFinite(used) ? used : 0;
-          currency =
-            credit.currencyCode ||
-            consumed.currencyCode ||
-            currency;
-
-          if (props.displayName) {
-            names.push(String(props.displayName));
-          }
-        }
-      }
-
-      if (foundAmounts) {
-        const remaining = Math.max(0, totalCredit - totalConsumed);
-        const lines = [
-          "💳 Azure credit balance",
-          `Remaining credit: ${formatMoney(remaining)} ${currency}`,
-          `Used credit: ${formatMoney(totalConsumed)} ${currency}`,
-          `Total credit: ${formatMoney(totalCredit)} ${currency}`
-        ];
-
-        if (names.length === 1) {
-          lines.push(`Benefit: ${names[0]}`);
-        }
-
-        lines.push("ℹ️ Azure benefit data can lag behind recent usage.");
-        return lines.join("\n");
-      }
-    }
-
-    return (
-      "💳 Azure credit balance\n" +
-      "❌ No readable Azure credit resource was returned for this subscription.\n" +
-      "Give the Cloudflare Azure application Reader access at the subscription scope, then try /balance again."
-    );
-  } catch (err) {
-    const msg = String(err?.message || err || "");
-
-    if (msg.includes("403") || msg.toLowerCase().includes("authorization")) {
+    result = await queryTotalCostForScope(env, subscriptionScope, 365);
+  } catch (subscriptionErr) {
+    try {
+      result = await queryTotalCostForScope(env, resourceGroupScope, 365);
+      scopeLabel = env.RESOURCE_GROUP;
+      limitedScope = true;
+    } catch (resourceGroupErr) {
       return (
-        "💳 Azure credit balance\n" +
-        "❌ The Cloudflare Azure application cannot read subscription credit benefits yet.\n" +
-        "Add the Reader role to the same Azure app at the subscription scope, then try /balance again."
+        "💳 Azure for Students — estimated balance\n" +
+        "❌ Cost data could not be read, so an estimate cannot be calculated.\n" +
+        `Error: ${shortError(resourceGroupErr)}`
       );
     }
+  }
 
-    if (msg.includes("404") || msg.toLowerCase().includes("notfound")) {
-      return (
-        "💳 Azure credit balance\n" +
-        "❌ Azure Billing Benefits did not return a credit resource for this subscription.\n" +
-        "Your credit is still visible in Azure Portal > Benefits."
-      );
-    }
+  const used = Math.max(0, Number(result?.total || 0));
+  const currency = String(result?.currency || "USD").toUpperCase();
 
+  if (currency !== "USD") {
     return (
-      "💳 Azure credit balance\n" +
-      `❌ Balance query failed: ${shortError(err)}`
+      "💳 Azure for Students — estimated balance\n" +
+      `❌ Azure returned cost data in ${currency}, but the student credit baseline is 100 USD.\n` +
+      "No estimate was calculated to avoid mixing currencies."
     );
   }
+
+  const remaining = Math.max(0, initialCredit - used);
+
+  const lines = [
+    "💳 Azure for Students — estimated balance",
+    `Estimated remaining: ${formatMoney(remaining)} USD`,
+    `Estimated used: ${formatMoney(used)} USD`,
+    `Initial credit: ${formatMoney(initialCredit)} USD`,
+    `Cost scope: ${scopeLabel}`,
+    "ℹ️ Estimate = initial credit − Azure Cost Management usage from the last 365 days."
+  ];
+
+  if (limitedScope) {
+    lines.push(
+      `⚠️ Subscription-wide cost was not accessible, so this estimate only includes ${env.RESOURCE_GROUP}. Costs outside this resource group are not included.`
+    );
+  }
+
+  lines.push("ℹ️ Azure cost data can arrive with a delay, so this is not the exact portal balance.");
+
+  return lines.join("\n");
 }
 
 function helpText() {
