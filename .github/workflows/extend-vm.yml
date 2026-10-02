@@ -1,0 +1,118 @@
+name: Extend VM / Skip Shutdown
+
+on:
+  workflow_dispatch:
+    inputs:
+      shutdown_time:
+        description: 'Keep VM running until (Bangladesh time)'
+        required: true
+        default: '22:00'
+        type: choice
+        options:
+          - '09:00'
+          - '10:00'
+          - '11:00'
+          - '12:00'
+          - '14:00'
+          - '18:00'
+          - '20:00'
+          - '22:00'
+          - '23:00'
+          - '23:30'
+          - 'Custom'
+
+      custom_time:
+        description: 'Only if Custom. Use HH:MM, e.g. 15:30 or 01:30'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: harmes-vm_group
+  VM_NAME: harmes-vm
+
+jobs:
+  extend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Login to Azure
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Select target time
+        shell: bash
+        env:
+          SELECTED_TIME: ${{ inputs.shutdown_time }}
+          CUSTOM_TIME: ${{ inputs.custom_time }}
+        run: |
+          if [ "$SELECTED_TIME" = "Custom" ]; then
+            if [ -z "$CUSTOM_TIME" ]; then
+              echo "custom_time is required when Custom is selected."
+              exit 1
+            fi
+            TARGET_TIME="$CUSTOM_TIME"
+          else
+            TARGET_TIME="$SELECTED_TIME"
+          fi
+
+          if ! [[ "$TARGET_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; then
+            echo "Invalid time. Use HH:MM, for example 23:30."
+            exit 1
+          fi
+
+          echo "TARGET_TIME=$TARGET_TIME" >> "$GITHUB_ENV"
+
+      - name: Calculate next occurrence
+        id: calc
+        shell: bash
+        run: |
+          python3 <<'PY'
+          import os
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+
+          dhaka = ZoneInfo("Asia/Dhaka")
+          utc = ZoneInfo("UTC")
+
+          now = datetime.now(dhaka)
+          hour, minute = map(int, os.environ["TARGET_TIME"].split(":"))
+
+          target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+          if target <= now:
+              target += timedelta(days=1)
+
+          target_utc = target.astimezone(utc)
+
+          epoch = int(target.timestamp())
+          local_text = target.strftime("%Y-%m-%d %H:%M")
+          utc_hhmm = target_utc.strftime("%H%M")
+
+          print("Current Dhaka time:", now.strftime("%Y-%m-%d %H:%M:%S"))
+          print("Shutdown Dhaka time:", local_text)
+          print("Azure auto-shutdown UTC:", utc_hhmm)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"epoch={epoch}\n")
+              f.write(f"local={local_text}\n")
+              f.write(f"utc_hhmm={utc_hhmm}\n")
+          PY
+
+      - name: Save extension and update Azure auto-shutdown
+        shell: bash
+        run: |
+          VM_ID=$(az vm show -g "$RESOURCE_GROUP" -n "$VM_NAME" --query id -o tsv)
+
+          az tag update             --resource-id "$VM_ID"             --operation Merge             --tags               RunUntilEpoch="${{ steps.calc.outputs.epoch }}"               RunUntilLocal="${{ steps.calc.outputs.local }}"
+
+          az vm auto-shutdown             -g "$RESOURCE_GROUP"             -n "$VM_NAME"             --time "${{ steps.calc.outputs.utc_hhmm }}"
+
+          echo "VM extension saved."
+          echo "VM can run until ${{ steps.calc.outputs.local }} Bangladesh time."
