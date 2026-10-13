@@ -499,9 +499,9 @@ async function handleTelegramUpdate(update, env) {
         return;
       }
       if (action === "smartstop") {
-        const current = await taskRpc(env, "/status");
-        if (current?.activeCount || current?.deallocating) {
-          await answerCallback(env, callbackId, "Hermes busy or VM deallocating");
+        const result = await taskRpc(env, "/manual-stop", { token: expectedRaw });
+        if (!result?.ok) {
+          await answerCallback(env, callbackId, "Confirmation expired or Hermes is busy");
           return;
         }
         await answerCallback(env, callbackId, "Deallocating");
