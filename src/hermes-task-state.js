@@ -155,6 +155,16 @@ export class HermesTaskState {
         }
       }
       answer = { ok: true, managed: !!s.lastEventAt, idleUntil: s.idleUntil };
+    } else if (path === "/manual-stop") {
+      // Expired buttons must not stop an unrelated/new Hermes session.
+      const valid = !!s.pendingToken && s.pendingToken === input.token
+        && s.promptDelivered && !s.deallocating
+        && !Object.keys(s.sessions || {}).length
+        && now < s.pendingUntil;
+      if (valid) {
+        s.deallocating = true;
+        answer = { ok: true };
+      } else answer = { ok: false, reason: "expired_or_busy" };
     } else if (path === "/claim") {
       const due = !!s.pendingToken && s.promptDelivered && now >= s.pendingUntil;
       if (!s.deallocating && !Object.keys(s.sessions || {}).length && due && s.pendingToken === input.token) {
