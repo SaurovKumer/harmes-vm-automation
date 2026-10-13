@@ -26,3 +26,29 @@ The Python bridge uses `context.get("session_id")`. Hermes hook context fields d
 
 ## Known constraints
 Hook requests use a 4-second timeout; if event delivery fails, the Python hook writes only the error type to its local log. There is currently no retry queue. The Durable Object accepts signed events less than five minutes old and deduplicates recent delivery IDs; production needs more robust deduplication for higher event volumes. Task events sent while the VM is shutting down can be lost; do not use absence of an end event as proof that work has finished.
+
+
+## New task-aware implementation (not yet production tested)
+
+The development branch adds a smart lifecycle state machine in `src/hermes-task-state.js` and integrates it with the production cron logic in `src/index.js`. Original commands remain.
+
+Run locally (Node.js 22 or later):
+```powershell
+git pull origin feature/hermes-smart-task-design
+node --check src/index.js
+node --check src/hermes-task-state.js
+node --test tests/hermes-task-state.test.mjs
+npx.cmd wrangler deploy --config wrangler.staging.toml
+```
+
+**Do not merge until the tests pass.** Staging deliberately has no Azure access or scheduler, so testing staging validates only Hermes event ingress and Durable Object behavior, not actual automatic deallocation.
+
+Before production rollout:
+1. Provision `HERMES_EVENT_SECRET` on the **production** Cloudflare Worker; use a dedicated secret distinct from staging.
+2. The VM hook currently reports to **staging**. After production is deployed and configured, update `~/.hermes/vm-task-monitor.json` with the production worker URL and its new secret. Never reveal the secret in logs/chat.
+3. Confirm production receives `agent:start` and `agent:end` via its authenticated status endpoint **before** relying on task-aware deallocation.
+4. Verify a >30-minute test task stays running, a 30-minute idle prompts, a 5-minute no-reply deallocates, `Keep Alive` adds 15 minutes, and a new task cancels an old confirmation.
+5. Keep the legacy 30-minute fallback for sessions that have never delivered a valid lifecycle event to production.
+6. Back up and test the production Worker before merging. The staging test alone does not establish end-to-end safety.
+
+**Known limitation:** Gateway `agent:step` is not a guaranteed heartbeat during an uninterrupted long-running tool call; the coordinator currently considers a session stale after 45 minutes without an event, and may prompt for deallocation. This is a cost safety measure; improve with a gateway-level periodic heartbeat before claiming all long-running tasks are protected. A brief race remains possible between checking task state and Azure accepting a deallocation request; require a production integration test before rollout.
