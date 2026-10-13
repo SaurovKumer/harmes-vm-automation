@@ -61,7 +61,7 @@ function processEvent(s, input, now) {
     s.sessions[input.session_id] = { startedAt: now, lastSeen: now };
     s.idleUntil = 0;
     cancelPrompt(s);
-  } else if (input.event === "agent:step") {
+  } else if (input.event === "agent:step" || input.event === "agent:heartbeat") {
     // Never resurrect a previously completed or unknown session.
     if (s.sessions[input.session_id]) s.sessions[input.session_id].lastSeen = now;
   } else {
@@ -120,7 +120,7 @@ export class HermesTaskState {
     catch { return Response.json({ error: "Bad JSON" }, { status: 400 }); }
     let answer;
     if (path === "/event") {
-      if (!["agent:start", "agent:step", "agent:end"].includes(input.event)
+      if (!["agent:start", "agent:step", "agent:heartbeat", "agent:end"].includes(input.event)
         || typeof input.session_id !== "string"
         || !input.session_id || input.session_id.length > 256
         || typeof input.delivery_id !== "string"
