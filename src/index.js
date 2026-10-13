@@ -1,3 +1,5 @@
+export { HermesTaskState } from "./hermes-task-state.js";
+
 let tokenCache = { token: null, expiresAt: 0 };
 
 const ARM = "https://management.azure.com";
