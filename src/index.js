@@ -35,6 +35,42 @@ export default {
       return new Response("OK");
     }
 
+    if (request.method === "POST" && url.pathname === "/hermes-event") {
+      // Task lifecycle receiver only. No VM-power action in this version.
+      const secret = String(env.HERMES_EVENT_SECRET || "");
+      if (secret.length < 32 || !env.HERMES_TASK_STATE) {
+        return new Response("Not configured", { status: 503 });
+      }
+      const raw = await request.text();
+      if (raw.length > 4096) return new Response("Too large", { status: 413 });
+      const signature = request.headers.get("X-Hermes-Signature-256") || "";
+      const key = await crypto.subtle.importKey("raw",
+        new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" },
+        false, ["verify"]);
+      const supplied = signature.startsWith("sha256=") ? signature.slice(7) : "";
+      if (!/^[0-9a-f]{64}$/i.test(supplied)) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      const bytes = new Uint8Array(supplied.match(/../g).map(x => parseInt(x, 16)));
+      const authenticated = await crypto.subtle.verify("HMAC", key, bytes,
+        new TextEncoder().encode(raw));
+      if (!authenticated) return new Response("Unauthorized", { status: 401 });
+      let payload;
+      try { payload = JSON.parse(raw); }
+      catch { return new Response("Bad JSON", { status: 400 }); }
+      const now = Math.floor(Date.now() / 1000);
+      if (!Number.isInteger(payload.timestamp) || Math.abs(now - payload.timestamp) > 300) {
+        return new Response("Stale event", { status: 400 });
+      }
+      const objectId = env.HERMES_TASK_STATE.idFromName("single-vm");
+      return env.HERMES_TASK_STATE.get(objectId).fetch(
+        new Request("https://internal/event", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+      );
+    }
+
     return new Response("Not Found", { status: 404 });
   },
 
