@@ -18,6 +18,56 @@ HOME = Path.home() / ".hermes"
 CONFIG = HOME / "vm-task-monitor.json"
 LOG = HOME / "hooks" / "vm-task-monitor" / "activity.log"
 
+# Background keepalives continue during long tool calls if the Hermes
+# gateway asyncio event loop is healthy. Every session is cancelled on end.
+HEARTBEAT_SECONDS = 60
+_heartbeat_tasks = {}
+
+
+def log_error(exc):
+    # Deliberately omit configuration, request payloads, and credentials.
+    with LOG.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({
+            "time": datetime.now(timezone.utc).isoformat(),
+            "bridge_error": type(exc).__name__,
+        }) + "\\n")
+
+
+def build_payload(kind, session):
+    return {
+        "event": kind,
+        "session_id": session,
+        "timestamp": int(time.time()),
+        "delivery_id": uuid.uuid4().hex,
+    }
+
+
+async def heartbeat_loop(session):
+    try:
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            try:
+                if not CONFIG.exists():
+                    continue
+                cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+                url = str(cfg.get("worker_url") or "")
+                secret = str(cfg.get("secret") or "")
+                if url.startswith("https://") and len(secret) >= 32:
+                    await asyncio.to_thread(
+                        send_signed, url, secret,
+                        build_payload("agent:heartbeat", session)
+                    )
+            except Exception as exc:
+                log_error(exc)
+    except asyncio.CancelledError:
+        return
+
+
+def stop_heartbeat(session):
+    task = _heartbeat_tasks.pop(session, None)
+    if task and not task.done():
+        task.cancel()
+
 
 def send_signed(url, secret, payload):
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
@@ -49,23 +99,22 @@ async def handle(event_type: str, context: dict):
     if not session or not CONFIG.exists():
         return
 
+    if event_type == "agent:start":
+        stop_heartbeat(session)
+    elif event_type == "agent:end":
+        stop_heartbeat(session)
+
     try:
         cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
         url = str(cfg.get("worker_url") or "")
         secret = str(cfg.get("secret") or "")
         if not url.startswith("https://") or len(secret) < 32:
             return
-        payload = {
-            "event": event_type,
-            "session_id": session,
-            "timestamp": int(time.time()),
-            "delivery_id": uuid.uuid4().hex,
-        }
-        await asyncio.to_thread(send_signed, url, secret, payload)
+        await asyncio.to_thread(
+            send_signed, url, secret, build_payload(event_type, session)
+        )
     except Exception as exc:
-        # No secret or sensitive conversation text is logged.
-        with LOG.open("a", encoding="utf-8") as f:
-            f.write(json.dumps({
-                "time": now,
-                "bridge_error": type(exc).__name__,
-            }) + "\n")
+        log_error(exc)
+    finally:
+        if event_type == "agent:start":
+            _heartbeat_tasks[session] = asyncio.create_task(heartbeat_loop(session))
