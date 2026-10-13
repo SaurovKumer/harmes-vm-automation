@@ -30,7 +30,7 @@ def log_error(exc):
         f.write(json.dumps({
             "time": datetime.now(timezone.utc).isoformat(),
             "bridge_error": type(exc).__name__,
-        }) + "\\n")
+        }) + "\n")
 
 
 def build_payload(kind, session):
