@@ -103,6 +103,55 @@ export default {
   }
 };
 
+
+async function taskRpc(env, path, payload) {
+  if (!env.HERMES_TASK_STATE) return null;
+  const id = env.HERMES_TASK_STATE.idFromName("single-vm");
+  const req = path === "/status"
+    ? new Request("https://internal/status")
+    : new Request("https://internal" + path, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {})
+      });
+  const res = await env.HERMES_TASK_STATE.get(id).fetch(req);
+  if (!res.ok) throw new Error("Hermes state " + path + ": HTTP " + res.status);
+  return res.json();
+}
+async function handleSmartScheduler(env) {
+  const tick = await taskRpc(env, "/tick");
+  if (!tick || tick.action === "legacy") return false;
+  if (tick.action === "prompt") {
+    await sendMessage(env,
+      (tick.stale ? "⚠️ Hermes heartbeat is stale.\\n" : "") +
+      "🤖 Hermes is inactive. Keep VM running?\\n" +
+      "No reply within 5 minutes = Azure DEALLOCATION.",
+      [[{ text: "✅ Keep Alive +15m", callback_data: "smartkeep15|" + tick.token }],
+       [{ text: "📊 Status", callback_data: "status|0" },
+        { text: "🛑 Deallocate now", callback_data: "smartstop|" + tick.token }]]
+    );
+    await taskRpc(env, "/prompt-delivered", { token: tick.token });
+  } else if (tick.action === "due") {
+    const claim = await taskRpc(env, "/claim", { token: tick.token });
+    if (claim?.ok) {
+      try {
+        const latest = await taskRpc(env, "/status");
+        if (latest?.deallocating && latest.activeCount === 0) {
+          await deallocateVm(env);
+          await mergeTags(env, {
+            RunUntilEpoch: 0, RunUntilLocal: "none",
+            WarningForEpoch: 0, LastPowerState: "deallocating"
+          });
+          await sendMessage(env, "🛑 Hermes idle window expired: VM DEALLOCATION requested.");
+        } else await taskRpc(env, "/release", { token: tick.token });
+      } catch (err) {
+        await taskRpc(env, "/release", { token: tick.token });
+        throw err;
+      }
+    }
+  }
+  return true;
+}
+
 async function getAzureToken(env) {
   if (tokenCache.token && Date.now() < tokenCache.expiresAt) {
     return tokenCache.token;
@@ -332,6 +381,15 @@ async function statusMessage(env) {
     lines.push("⏳ Planned deallocation: not currently set");
   }
 
+  if (env.HERMES_TASK_STATE) {
+    const task = await taskRpc(env, "/status");
+    if (task?.managed) {
+      lines.push(`🤖 Hermes active tasks: ${task.activeCount}`);
+      if (task.pendingUntil > now) lines.push(`⏰ Reply by: ${formatDhakaEpoch(task.pendingUntil)}`);
+      else if (!task.activeCount && task.idleUntil > now)
+        lines.push(`💤 Inactivity deadline: ${formatDhakaEpoch(task.idleUntil)}`);
+    }
+  }
   lines.push(`⏰ Daily auto-start: ${auto} (Bangladesh time)`);
   return lines.join("\n");
 }
@@ -367,6 +425,7 @@ async function requestStart(env, source = "Telegram") {
   }
 
   await startVm(env);
+  await taskRpc(env, "/reset");
   const deadline = now + 30 * 60;
 
   await mergeTags(env, {
@@ -413,6 +472,8 @@ async function extendRuntime(env, minutes) {
     WarningForEpoch: 0
   });
 
+  await taskRpc(env, "/extend", { deadline });
+
   return (
     `✅ ${env.VM_NAME} extended by ${humanMinutes(minutes)}.\n` +
     `New planned deallocation: ${formatDhakaEpoch(deadline)}`
@@ -431,6 +492,22 @@ async function handleTelegramUpdate(update, env) {
       const [action, expectedRaw] = raw.split("|", 2);
       const expectedDeadline = Number(expectedRaw || 0);
 
+      if (action === "smartkeep15") {
+        const result = await taskRpc(env, "/keep", { token: expectedRaw });
+        await answerCallback(env, callbackId, result?.ok ? "Kept alive 15 minutes" : "Confirmation expired");
+        if (result?.ok) await sendMessage(env, "✅ VM kept alive for another 15 minutes.");
+        return;
+      }
+      if (action === "smartstop") {
+        const current = await taskRpc(env, "/status");
+        if (current?.activeCount || current?.deallocating) {
+          await answerCallback(env, callbackId, "Hermes busy or VM deallocating");
+          return;
+        }
+        await answerCallback(env, callbackId, "Deallocating");
+        await sendMessage(env, await requestDeallocate(env, "Smart confirmation"));
+        return;
+      }
       if (action === "status") {
         await answerCallback(env, callbackId, "Status sent");
         await sendMessage(env, await statusMessage(env));
@@ -685,6 +762,10 @@ async function runScheduler(env) {
       const remaining = deadline - epochNow();
       const warnedFor = intTag(tags.WarningForEpoch);
 
+      // Task-aware shutdown takes precedence. Legacy timer stays as fallback
+      // until the first authenticated task event reaches this Worker.
+      if (env.HERMES_TASK_STATE && await handleSmartScheduler(env)) return;
+
       if (remaining <= 0) {
         await deallocateVm(env);
         await mergeTags(env, {
@@ -726,6 +807,7 @@ async function runScheduler(env) {
     }
 
     if (state.code === "deallocated") {
+      await taskRpc(env, "/reset");
       if (lastState === "deallocating") {
         await mergeTags(env, {
           RunUntilEpoch: 0,
