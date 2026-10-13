@@ -37,6 +37,28 @@ export default {
       return new Response("OK");
     }
 
+    if (request.method === "GET" && url.pathname === "/hermes-status") {
+      // Read-only staging verification endpoint. Never returns messages or tokens.
+      const secret = String(env.HERMES_EVENT_SECRET || "");
+      if (secret.length < 32 || !env.HERMES_TASK_STATE) {
+        return new Response("Not configured", { status: 503 });
+      }
+      const supplied = request.headers.get("X-Hermes-Status-Token") || "";
+      // Both values are known to be nonempty and lengthy; avoid plain string equality.
+      const enc = new TextEncoder();
+      const key = await crypto.subtle.importKey("raw", enc.encode(secret),
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      // The caller supplies a short-lived, epoch-minute-specific digest.
+      const nowMinute = Math.floor(Date.now() / 60000);
+      const valid = await Promise.all([nowMinute - 1, nowMinute, nowMinute + 1].map(async minute => {
+        const bytes = await crypto.subtle.sign("HMAC", key, enc.encode("status:" + minute));
+        return [...new Uint8Array(bytes)].map(x => x.toString(16).padStart(2, "0")).join("") === supplied;
+      }));
+      if (!valid.some(Boolean)) return new Response("Unauthorized", { status: 401 });
+      const id = env.HERMES_TASK_STATE.idFromName("single-vm");
+      return env.HERMES_TASK_STATE.get(id).fetch("https://internal/status");
+    }
+
     if (request.method === "POST" && url.pathname === "/hermes-event") {
       // Task lifecycle receiver only. No VM-power action in this version.
       const secret = String(env.HERMES_EVENT_SECRET || "");
