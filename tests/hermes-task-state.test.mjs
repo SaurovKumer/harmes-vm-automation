@@ -98,3 +98,23 @@ test('duplicate delivery is ignored and late step cannot reactivate session',asy
   assert.equal((await status()).activeCount,0);
   assert.equal((await status()).receivedCount,3);
 });
+
+test('periodic heartbeat keeps a long-running session active; stale session prompts',async()=>{
+  const old=Date.now;
+  try {
+    let current=1_800_300_000_000;
+    Date.now=()=>current;
+    const {post,status}=setup();
+    await post('/event',event('start','long-task','delivery111'));
+    for(let i=0;i<60;i++){
+      current+=60*1000;
+      await post('/event',event('heartbeat','long-task','beatnumber'+i+'abc'));
+    }
+    assert.equal((await status()).activeCount,1);
+    assert.equal((await post('/tick')).action,'active');
+    current+=46*60*1000;
+    const stale=await post('/tick');
+    assert.equal(stale.action,'prompt');
+    assert.equal(stale.stale,true);
+  } finally {Date.now=old;}
+});
