@@ -27,6 +27,8 @@ def send_signed(url, secret, payload):
         data=body,
         headers={
             "Content-Type": "application/json",
+            "User-Agent": "Hermes-Task-Monitor/1.0",
+            "Accept": "application/json",
             "X-Hermes-Signature-256": "sha256=" + digest,
         },
         method="POST",
