@@ -98,7 +98,7 @@ function clockDecision(s, now) {
   for (const [id] of stale) delete s.sessions[id];
   if (stale.length) {
     s.staleWarning = true;
-    // The gateway could have crashed. Notify promptly rather than waiting another 30m.
+    // The gateway could have crashed. Notify promptly instead of waiting for the normal 10-minute idle deadline.
     if (!Object.keys(s.sessions).length) s.idleUntil = now;
   }
   if (Object.keys(s.sessions).length) return { action: "active" };
