@@ -192,7 +192,8 @@ test('DRY RUN: Telegram Keep Alive +15m cancels original deallocation', async()=
     x.advance(minutes(6));
     await x.tick();
     assert.equal(x.countStops(),0);
-    x.advance(minutes(9));
+    assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,1);
+    x.advance(minutes(4));
     await x.tick();
     const warnings=x.sent.filter(m=>m.text?.includes('Hermes is inactive'));
     assert.equal(warnings.length,2,'new prompt after 15 more minutes');
@@ -224,6 +225,10 @@ test('DRY RUN: fresh Hermes task cancels a pending warning', async()=>{
     await x.tick();
     assert.equal(x.countStops(),0);
     assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,1);
+    x.advance(minutes(1));
+    await x.tick();
+    assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,2,
+      'new task completion gets its own five-minute early warning');
   } finally{x.restore();}
 });
 
