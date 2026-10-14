@@ -28,7 +28,7 @@ test('unmanaged worker preserves legacy behavior',async()=>{
   const {post}=setup();
   assert.equal((await post('/tick')).action,'legacy');
 });
-test('active task overrides 30m timer and completed task waits 30m',async()=>{
+test('active task overrides 30m legacy timer; after completion warn at 5m and stop at 10m',async()=>{
   const old=Date.now;
   try {
     let current=1_800_000_000_000;
@@ -42,7 +42,9 @@ test('active task overrides 30m timer and completed task waits 30m',async()=>{
     await post('/event',event('end','chat-1','delivery333'));
     assert.equal((await status()).activeCount,0);
     assert.equal((await post('/tick')).action,'idle');
-    current+=30*60*1000;
+    current+=4*60*1000;
+    assert.equal((await post('/tick')).action,'idle');
+    current+=60*1000;
     const prompt=await post('/tick');
     assert.equal(prompt.action,'prompt');
     const delivered=await post('/prompt-delivered',{token:prompt.token});
@@ -61,7 +63,7 @@ test('keep15 cancels pending deallocation; old buttons expire',async()=>{
     const {post}=setup();
     await post('/event',event('start','session','delivery111'));
     await post('/event',event('end','session','delivery222'));
-    current+=30*60*1000;
+    current+=5*60*1000;
     const first=await post('/tick');
     await post('/prompt-delivered',{token:first.token});
     assert.equal((await post('/keep',{token:first.token})).ok,true);
@@ -80,7 +82,7 @@ test('new task cancels pending deallocation and blocks stale manual stop',async(
     const {post}=setup();
     await post('/event',event('start','session','delivery111'));
     await post('/event',event('end','session','delivery222'));
-    current+=30*60*1000;
+    current+=5*60*1000;
     const prompt=await post('/tick');
     await post('/prompt-delivered',{token:prompt.token});
     await post('/event',event('start','session','delivery333'));
@@ -153,7 +155,7 @@ test('new task between deallocation claim and Azure preflight cancels request',a
     const {post,status}=setup();
     await post('/event',event('start','first','delivery111'));
     await post('/event',event('end','first','delivery222'));
-    current+=30*60*1000;
+    current+=5*60*1000;
     const prompt=await post('/tick');
     assert.equal(prompt.action,'prompt');
     await post('/prompt-delivered',{token:prompt.token});
