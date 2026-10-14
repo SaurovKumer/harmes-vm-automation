@@ -136,6 +136,10 @@ async function handleSmartScheduler(env) {
       try {
         const latest = await taskRpc(env, "/status");
         if (latest?.deallocating && latest.activeCount === 0) {
+          // Final serialized state check limits a late-start race; external
+          // Azure dispatch is still not atomic with Hermes event ingress.
+          const preflight = await taskRpc(env, "/preflight", { token: tick.token });
+          if (!preflight?.ok) return true;
           await deallocateVm(env);
           await mergeTags(env, {
             RunUntilEpoch: 0, RunUntilLocal: "none",
