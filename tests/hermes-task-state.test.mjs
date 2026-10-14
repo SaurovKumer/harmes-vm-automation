@@ -144,3 +144,23 @@ test('manual +60 minute extension survives task end and an intervening new task'
     assert.equal((await post('/tick')).action,'prompt');
   }finally{Date.now=old;}
 });
+
+test('new task between deallocation claim and Azure preflight cancels request',async()=>{
+  const old=Date.now;
+  try {
+    let current=1_800_600_000_000;
+    Date.now=()=>current;
+    const {post,status}=setup();
+    await post('/event',event('start','first','delivery111'));
+    await post('/event',event('end','first','delivery222'));
+    current+=30*60*1000;
+    const prompt=await post('/tick');
+    assert.equal(prompt.action,'prompt');
+    await post('/prompt-delivered',{token:prompt.token});
+    current+=5*60*1000;
+    assert.equal((await post('/claim',{token:prompt.token})).ok,true);
+    await post('/event',event('start','late-task','delivery333'));
+    assert.equal((await status()).activeCount,1);
+    assert.equal((await post('/preflight',{token:prompt.token})).ok,false);
+  } finally {Date.now=old;}
+});
