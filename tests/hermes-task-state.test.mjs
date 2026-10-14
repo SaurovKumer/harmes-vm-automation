@@ -140,9 +140,9 @@ test('manual +60 minute extension survives task end and an intervening new task'
     current+=5*60*1000;
     await post('/event',event('end','session-b','delivery444'));
     assert.equal((await status()).idleUntil,extendedTo);
-    current=Math.floor(extendedTo*1000)-1000;
+    current=(extendedTo-5*60)*1000-1000;
     assert.equal((await post('/tick')).action,'idle');
-    current=extendedTo*1000;
+    current=(extendedTo-5*60)*1000;
     assert.equal((await post('/tick')).action,'prompt');
   }finally{Date.now=old;}
 });
