@@ -150,7 +150,7 @@ function dryRun() {
 }
 const minutes=(x)=>x*60*1000;
 
-test('DRY RUN: active task blocks expired legacy timer; idle triggers 5m warning then Azure deallocation', async()=>{
+test('DRY RUN: active task blocks expired legacy timer; completed task warns at minute 5 and deallocates at minute 10', async()=>{
   const x=dryRun();
   try {
     await x.event('start');
@@ -160,7 +160,7 @@ test('DRY RUN: active task blocks expired legacy timer; idle triggers 5m warning
     assert.equal(x.sent.length,0,'no warning while Hermes active');
 
     await x.event('end');
-    x.advance(minutes(29));
+    x.advance(minutes(4));
     await x.tick();
     assert.equal(x.sent.length,0);
     x.advance(minutes(1));
@@ -182,7 +182,7 @@ test('DRY RUN: Telegram Keep Alive +15m cancels original deallocation', async()=
   try {
     await x.event('start');
     await x.event('end');
-    x.advance(minutes(30));
+    x.advance(minutes(5));
     await x.tick();
     assert.equal(x.sent.length,1);
     const token=x.sent[0].reply_markup.inline_keyboard[0][0].callback_data.split('|')[1];
@@ -209,7 +209,7 @@ test('DRY RUN: fresh Hermes task cancels a pending warning', async()=>{
   try {
     await x.event('start');
     await x.event('end');
-    x.advance(minutes(30));
+    x.advance(minutes(5));
     await x.tick();
     const token=x.sent[0].reply_markup.inline_keyboard[0][0].callback_data.split('|')[1];
     x.advance(minutes(2));
@@ -220,7 +220,7 @@ test('DRY RUN: fresh Hermes task cancels a pending warning', async()=>{
     await x.tick();
     assert.equal(x.countStops(),0,'new task blocks timeout');
     await x.event('end','new-task');
-    x.advance(minutes(29));
+    x.advance(minutes(4));
     await x.tick();
     assert.equal(x.countStops(),0);
     assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,1);
