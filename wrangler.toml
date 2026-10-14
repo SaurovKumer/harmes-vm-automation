@@ -7,6 +7,8 @@ keep_vars = true
 [vars]
 RESOURCE_GROUP = "harmes-vm_group"
 VM_NAME = "harmes-vm"
+# Safety default: deploying this branch must not activate task-driven deallocation.
+SMART_DEALLOCATE_ENABLED = "false"
 
 [triggers]
 crons = ["* * * * *"]
