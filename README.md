@@ -88,6 +88,7 @@ src/
   legacy-recovery.js       # Legacy behavior for recovery
 scripts/
   setup-production.ps1     # One-shot production Hermes activation
+  deploy-timer-update.ps1  # Safe timer updates, preserve selected Smart Mode
 wrangler.toml              # Worker config; smart mode defaults OFF
 wrangler.recovery.toml     # Recovery entrypoint; smart mode OFF
 ```
@@ -129,6 +130,21 @@ Then send **`/status`** to the Telegram bot to verify the deployed state:
 The checked-in `wrangler.toml` deliberately stays at `false`. **Warning: running `npx.cmd wrangler deploy --config wrangler.toml` after activation deploys OFF and can disable smart mode.**
 
 **Updated timer policy (October 14, 2026):** Both the default VM-start safety timer (Legacy Mode) and completed-Hermes-task inactivity window (Smart Mode) use **10 minutes**. Telegram warns after **5 minutes**, with **5 more minutes** to extend. Healthy active Hermes tasks are protected in Smart Mode; Legacy Mode does not know whether Hermes is busy. The policy takes effect in production only after a deliberate deployment that preserves/enables Smart Mode, not merely after a GitHub commit. Do not assume that a green health endpoint proves the bridge is functioning.
+
+### Deploy a timer/code update without rotating secrets
+
+**Do not rerun `setup-production.ps1` just to update a timer.** Use the safe timer deployment script. First read the live Smart Mode using Telegram `/status`, then run the matching command in Windows PowerShell:
+
+```powershell
+cd C:\Users\sauro\hermes-staging
+git pull --ff-only origin feature/hermes-smart-task-design
+
+# Choose exactly one based on LIVE Telegram /status:
+.\scripts\deploy-timer-update.ps1 -SmartMode Enabled
+# OR: .\scripts\deploy-timer-update.ps1 -SmartMode Disabled
+```
+
+The script runs Node syntax checks and all mock integration/unit tests before deploying, asks for explicit `DEPLOY` confirmation, and uses a temporary Wrangler config to preserve the chosen Smart Mode. It does **not** rotate secrets or restart Hermes Gateway. Check Telegram `/status` afterward. New VM starts and new Hermes task completions follow the 10-minute total / 5-minute warning policy; already-existing absolute deadlines can remain until the next lifecycle event. The emergency recovery Worker intentionally retains older legacy behavior.
 
 ### Recovery option
 
