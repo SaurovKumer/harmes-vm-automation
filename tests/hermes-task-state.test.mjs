@@ -111,6 +111,8 @@ test('periodic heartbeat keeps a long-running session active; stale session prom
       await post('/event',event('heartbeat','long-task','beatnumber'+i+'abc'));
     }
     assert.equal((await status()).activeCount,1);
+    assert.equal((await status()).heartbeatCount,60);
+    assert.ok((await status()).lastHeartbeatAt > 0);
     assert.equal((await post('/tick')).action,'active');
     current+=46*60*1000;
     const stale=await post('/tick');
