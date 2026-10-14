@@ -52,3 +52,12 @@ Before production rollout:
 6. Back up and test the production Worker before merging. The staging test alone does not establish end-to-end safety.
 
 **Known limitation:** Gateway `agent:step` is not a guaranteed heartbeat during an uninterrupted long-running tool call; the coordinator currently considers a session stale after 45 minutes without an event, and may prompt for deallocation. This is a cost safety measure; improve with a gateway-level periodic heartbeat before claiming all long-running tasks are protected. A brief race remains possible between checking task state and Azure accepting a deallocation request; require a production integration test before rollout.
+
+
+## Explicit Smart Deallocation enable switch
+
+The Worker is now **opt-in**: `SMART_DEALLOCATE_ENABLED` must be the literal string `true` for the task-aware scheduler to supersede the existing Azure tag deadline. With this variable missing or `false`, the existing legacy safety timer **still deallocates the VM even if Hermes is busy**. A code deployment alone DOES NOT enable Smart Deallocation.
+
+Before enabling, verify the production endpoint (not staging) is receiving fresh events. Use `wrangler secret put HERMES_EVENT_SECRET` for the production secret, use a separate production secret from staging, and change the VM's private hook URL/secret only after ensuring the production worker is ready. Do not print secrets. When ready to opt in, set `SMART_DEALLOCATE_ENABLED=true` on the production Worker using the Cloudflare dashboard or appropriate Wrangler variable configuration. The production `/status` Telegram command displays whether smart mode is enabled.
+
+**Do not enable yet**: Azure transition races, stale heartbeat failure, and real Telegram delivery still need end-to-end verification. The dry-run mocks verify that the Worker specifically calls the Azure `/deallocate` endpoint; no VM is deallocated by tests.
