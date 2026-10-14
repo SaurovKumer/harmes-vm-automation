@@ -2,21 +2,18 @@
 
 Cloudflare Worker + Telegram automation for safely operating an Azure Virtual Machine.
 
-The current runtime is **Cloudflare-based**. GitHub is used mainly for source control and automatic deployment to Cloudflare. Telegram sends commands to the Worker through a webhook, and the Worker talks directly to Azure.
+The current runtime is a **Cloudflare Worker + Telegram webhook + Azure APIs**. An optional **Hermes Gateway** bridge adds task-aware deallocation using HMAC-signed events and a Cloudflare Durable Object. GitHub stores the source. This feature-branch production rollout uses **Wrangler** from Windows PowerShell.
 
-> Current default VM:
->
-> - Resource group: `harmes-vm_group`
-> - VM name: `harmes-vm`
-> - Time zone used by the bot: Bangladesh / Asia-Dhaka
-
----
+> Production Worker: [harmes-vm-automation](https://harmes-vm-automation.saurovkumar07.workers.dev)  
+> Resource group: `harmes-vm_group` | VM: `harmes-vm` | Time zone: `Asia/Dhaka`  
+> **Safe source default:** `SMART_DEALLOCATE_ENABLED = "false"` in `wrangler.toml`. The one-shot activation script can switch the *deployed* Worker to ON using a temporary config. Telegram `/status` shows the real live setting.
 
 ## Features
 
 - Start the Azure VM from Telegram
 - Deallocate the VM from Telegram
-- 30-minute safety runtime after a VM start
+- Legacy 10-minute safety runtime after a VM start, when smart mode is OFF/uninitialized
+- Optional Hermes task-aware idle tracking, 5-minute Telegram confirmation and Azure deallocation
 - Warning about 5 minutes before automatic deallocation
 - Runtime extension buttons: +30m, +1h, +2h, +3h, +4h
 - Daily auto-start at a user-selected Bangladesh time
@@ -36,7 +33,7 @@ The current runtime is **Cloudflare-based**. GitHub is used mainly for source co
 | Command | Description |
 | --- | --- |
 | `/status` | Show VM state, planned deallocation time, remaining runtime, and auto-start setting |
-| `/startvm` | Start the VM and attach a 30-minute safety timer |
+| `/startvm` | Start the VM and attach a 10-minute safety timer |
 | `/deallocate` | Deallocate the VM immediately |
 | `/shutdown` | Alias for `/deallocate` |
 | `/keep30` | Extend runtime by 30 minutes |
@@ -66,68 +63,99 @@ Example:
 ## Architecture
 
 ```text
-Telegram
-   |
-   | HTTPS webhook
-   v
-Cloudflare Worker
-   |
-   +--> Azure Resource Manager
-   |      - VM status
-   |      - start
-   |      - deallocate
-   |      - VM/resource-group tags
-   |
-   +--> Azure Cost Management
-   |      - recent costs
-   |      - estimated student balance
-   |
-   +--> Telegram Bot API
-          - replies
-          - warning buttons
+Telegram --> HTTPS POST /telegram --> Cloudflare Worker --> Azure VM/Cost API
+                                               |
+Hermes Gateway --signed POST /hermes-event------+
+                                               |
+                                               v
+                                  HERMES_TASK_STATE Durable Object
+                                  (active sessions, heartbeat, idle deadline)
 
-Cloudflare Cron Trigger
-   |
-   +--> runs every minute
-        - daily auto-start check
-        - safety deadline check
-        - 5-minute warning
-        - manual VM state detection
+Cloudflare cron (* * * * *): daily auto-start and safety scheduling
+  - Legacy 10-minute timer when smart mode is OFF or uninitialized
+  - Task-aware idle/confirmation policy when enabled and managed
 ```
 
-GitHub stores the source code. Cloudflare Git integration automatically deploys changes from the `main` branch.
-
----
+The Worker continues running in Cloudflare when your PC is off. An ordinary code deployment does not guarantee that smart mode is enabled.
 
 ## Important files
 
 ```text
 README.md
 src/
-└── index.js
-wrangler.toml
+  index.js                 # Worker, Telegram commands, Azure API, cron
+  hermes-task-state.js     # Durable Object / task state
+  legacy-recovery.js       # Legacy behavior for recovery
+scripts/
+  setup-production.ps1     # One-shot production Hermes activation
+  deploy-timer-update.ps1  # Safe timer updates, preserve selected Smart Mode
+wrangler.toml              # Worker config; smart mode defaults OFF
+wrangler.recovery.toml     # Recovery entrypoint; smart mode OFF
 ```
 
-Current `wrangler.toml` contains:
+The Worker name is `harmes-vm-automation`, the scheduled cron is `* * * * *`, and `HERMES_TASK_STATE` binds to SQLite-backed class `HermesTaskState` using migration `v1-hermes-task-state`. Both Wrangler configs use `keep_vars = true`.
 
-```toml
-name = "vm-hermes-controller"
-main = "src/index.js"
-compatibility_date = "2026-10-01"
-workers_dev = true
-keep_vars = true
+## Current production rollout: one-shot setup
 
-[vars]
-RESOURCE_GROUP = "harmes-vm_group"
-VM_NAME = "harmes-vm"
+**Only activate when Hermes is idle.** You need Cloudflare Wrangler login, Node.js/npm, Windows OpenSSH, VM SSH key (or agent), and an active `hermes-gateway.service` with the task-monitor hook installed.
 
-[triggers]
-crons = ["* * * * *"]
+Run from your existing checked-out `feature/hermes-smart-task-design` working copy in PowerShell:
+
+```powershell
+cd C:\Users\sauro\hermes-staging
+git pull --ff-only origin feature/hermes-smart-task-design
+if ($LASTEXITCODE -eq 0) {
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup-production.ps1
+}
 ```
 
-`keep_vars = true` is important because it tells Wrangler to preserve variables/secrets that were added in the Cloudflare dashboard when new code is deployed.
+The script prompts for **uppercase `YES`** (lowercase `yes` cancels), then your SSH destination (e.g. `azureuser@<VM_PUBLIC_IP>`) and the private **key file path** (e.g. `C:\path\to\harmes-vm_key.pem`). Never paste the key *contents*.
 
----
+The four stages are:
+1. Verify SSH, Hermes Gateway service and installed task-monitor files.
+2. Create a random 32-byte production `HERMES_EVENT_SECRET` and store it as a Cloudflare secret.
+3. Back up `~/.hermes/vm-task-monitor.json` to `~/.hermes/vm-task-monitor.before-production.json`, point Hermes to the production Worker, restart the service, and verify real signed start/end event delivery.
+4. **Only after verified delivery**, deploy the Worker with `SMART_DEALLOCATE_ENABLED = "true"` using temporary `wrangler.activate.local.toml`, which the script deletes after use.
+
+Success message:
+
+```text
+SUCCESS: Production Hermes connected and Smart Auto-DEALLOCATE activated.
+```
+
+Then send **`/status`** to the Telegram bot to verify the deployed state:
+- `Smart auto-deallocation: ENABLED` means task-aware scheduling is enabled.
+- `Smart auto-deallocation: DISABLED (legacy timer)` means the 10-minute fallback runs instead.
+
+The checked-in `wrangler.toml` deliberately stays at `false`. **Warning: running `npx.cmd wrangler deploy --config wrangler.toml` after activation deploys OFF and can disable smart mode.**
+
+**Updated timer policy (October 14, 2026):** Both the default VM-start safety timer (Legacy Mode) and completed-Hermes-task inactivity window (Smart Mode) use **10 minutes**. Telegram warns after **5 minutes**, with **5 more minutes** to extend. Healthy active Hermes tasks are protected in Smart Mode; Legacy Mode does not know whether Hermes is busy. The policy takes effect in production only after a deliberate deployment that preserves/enables Smart Mode, not merely after a GitHub commit. Do not assume that a green health endpoint proves the bridge is functioning.
+
+### Deploy a timer/code update without rotating secrets
+
+**Do not rerun `setup-production.ps1` just to update a timer.** Use the safe timer deployment script. First read the live Smart Mode using Telegram `/status`, then run the matching command in Windows PowerShell:
+
+```powershell
+cd C:\Users\sauro\hermes-staging
+git pull --ff-only origin feature/hermes-smart-task-design
+
+# Choose exactly one based on LIVE Telegram /status:
+.\scripts\deploy-timer-update.ps1 -SmartMode Enabled
+# OR: .\scripts\deploy-timer-update.ps1 -SmartMode Disabled
+```
+
+The script runs Node syntax checks and all mock integration/unit tests before deploying, asks for explicit `DEPLOY` confirmation, and uses a temporary Wrangler config to preserve the chosen Smart Mode. It does **not** rotate secrets or restart Hermes Gateway. Check Telegram `/status` afterward. New VM starts and new Hermes task completions follow the 10-minute total / 5-minute warning policy; already-existing absolute deadlines can remain until the next lifecycle event. The emergency recovery Worker intentionally retains older legacy behavior.
+
+### Recovery option
+
+If smart behavior is unsafe or broken, while Hermes is idle use the legacy recovery configuration:
+
+```powershell
+npx.cmd wrangler deploy --dry-run --config wrangler.recovery.toml
+npx.cmd wrangler deploy --config wrangler.recovery.toml
+```
+
+This preserves the Durable Object *binding* in configuration and deploys the legacy code path. **It is a recovery option, not a guaranteed one-click rollback.** Durable Object migrations complicate ordinary version rollback, and dry-run checks building rather than live operation. Verify Telegram `/status` and VM control afterward. If activation fails before completion, check actual live state; do not assume partial Cloudflare/VM config changes were reversed.
 
 # Setup
 
@@ -256,45 +284,27 @@ at a suitable scope.
 
 # Cloudflare setup
 
-## 5. Connect the GitHub repository
+## 5. GitHub and Cloudflare Worker deployment
 
-In Cloudflare:
+Repository: [SaurovKumer/harmes-vm-automation](https://github.com/SaurovKumer/harmes-vm-automation). The task-aware work is on `feature/hermes-smart-task-design`.
 
-**Workers & Pages → Create / Import repository**
+This rollout uses Wrangler to deploy directly to Worker `harmes-vm-automation`. Pushing the feature branch alone is **not** evidence that Cloudflare automatically deployed it. If you configure Cloudflare Git integration, check the branch mapping separately.
 
-Connect:
+```powershell
+npx.cmd wrangler deploy --dry-run --config wrangler.toml
+# The command below is a REAL deployment of the OFF-by-default config:
+npx.cmd wrangler deploy --config wrangler.toml
+```
+
+**Do not run the second command to update smart-enabled production unintentionally:** it uses `SMART_DEALLOCATE_ENABLED = "false"` from the file.
+
+Production Worker URL:
 
 ```text
-SaurovKumer/harmes-vm-automation
+https://harmes-vm-automation.saurovkumar07.workers.dev
 ```
 
-Recommended deployment settings:
-
-```text
-Production branch: main
-Root directory: repository root / leave blank
-Build command: leave empty
-Deploy command: npx wrangler deploy
-```
-
-After a successful deploy, Cloudflare gives a Worker URL similar to:
-
-```text
-https://harmes-vm-automation.YOUR-SUBDOMAIN.workers.dev
-```
-
-Opening the root URL should return health JSON similar to:
-
-```json
-{
-  "ok": true,
-  "service": "VM_Hermes Cloudflare Worker",
-  "telegramWebhook": "/telegram",
-  "scheduler": "every minute"
-}
-```
-
----
+Opening `/` should return JSON containing `"ok": true` and the Telegram webhook path `/telegram`. That is a basic HTTP check only; use `/status` for live smart-mode status.
 
 ## 6. Cloudflare variables and secrets
 
@@ -312,7 +322,8 @@ Add the following.
 | `AZURE_SUBSCRIPTION_ID` | Text or Secret | Azure Portal → Subscriptions → Subscription ID |
 | `TELEGRAM_BOT_TOKEN` | **Secret** | Telegram BotFather |
 | `TELEGRAM_CHAT_ID` | Text or Secret | Telegram Bot API `getUpdates` before webhook setup |
-| `TELEGRAM_WEBHOOK_SECRET` | **Secret** | Create it yourself |
+| `TELEGRAM_WEBHOOK_SECRET` | **Secret** | Create it yourself for Telegram webhook authentication |
+| `HERMES_EVENT_SECRET` | **Secret** | Automatically generated by `scripts/setup-production.ps1`; authenticates Hermes task events |
 | `AZURE_CREDIT_START_DATE` | Text | Date your Azure for Students credit started, format `YYYY-MM-DD` |
 | `AZURE_INITIAL_CREDIT` | Text, optional | Initial student credit, default is `100` |
 
@@ -653,25 +664,13 @@ The Worker includes retry handling for temporary Azure throttling such as HTTP `
 
 ---
 
-# Safety timer
+# Safety timer: legacy vs. Hermes smart mode
 
-Whenever the automation starts the VM, it creates a 30-minute runtime deadline.
+**Legacy (smart OFF or task tracker not initialized):** Every detected VM start receives a **10-minute** safety deadline. About **5 minutes** before expiry Telegram offers extensions (+30m, +1h, +2h, +3h, +4h). Without an extension the Worker requests Azure **deallocation**. Legacy mode does **not** protect a long-running Hermes task.
 
-Approximately 5 minutes before that deadline, Telegram sends buttons:
+**Smart (explicitly ON and tracking signed Hermes events):** `POST /hermes-event` accepts authenticated `agent:start`, `agent:step`, `agent:heartbeat` and `agent:end` events. While a tracked task is active, the task-aware idle policy waits. When the last tracked task ends, a **10-minute inactivity window** begins. At approximately **5 minutes after task completion** (5 minutes before planned deallocation), Telegram asks whether to keep the VM running. The user has **5 minutes to respond**. The confirmation buttons are **Keep Alive +15m**, Status and Deallocate now. No response requests Azure **deallocate** (not just OS shutdown). The system treats a session with no new activity/heartbeat for **45 minutes** as stale and triggers an early confirmation rather than waiting indefinitely.
 
-```text
-+30 min
-+1 hour
-+2 hours
-+3 hours
-+4 hours
-Status
-Deallocate now
-```
-
-If no extension is selected, the Worker requests Azure VM deallocation when the deadline expires.
-
----
+**Important limitations:** The Gateway must actually deliver events, and no solution can guarantee freedom from a race when Azure receives a deallocation request at the same time a new task begins. Manual `/deallocate` and `/shutdown` still request deallocation; use them only when safe. If signed events have not initialized the tracker, the Worker falls back to the legacy deadline even if the flag is ON.
 
 # Daily auto-start
 
@@ -699,23 +698,16 @@ The Cloudflare cron trigger checks the schedule every minute.
 
 ---
 
-# Deployment and variable preservation
+# Deployment, live verification and variable preservation
 
-GitHub changes are automatically deployed through Cloudflare Git integration.
+The Worker is deployed with Wrangler in this rollout. `keep_vars = true` preserves dashboard-managed secrets/variables, but does not override the `SMART_DEALLOCATE_ENABLED` value explicitly defined in the deploy TOML. The cron runs every minute. The Telegram webhook normally does not need to be registered again after a deployment if its URL/secret are unchanged.
 
-Because the project uses:
-
-```toml
-keep_vars = true
+```powershell
+Invoke-RestMethod "https://harmes-vm-automation.saurovkumar07.workers.dev/"
+npx.cmd wrangler deployments list --name harmes-vm-automation --config wrangler.toml
 ```
 
-Cloudflare dashboard variables/secrets should remain available after future Wrangler deployments.
-
-After changing code, you normally do **not** need to run a terminal command to activate the Worker. Once Cloudflare reports that the deployment succeeded, the new Worker version is live.
-
-You also do not need to call `setWebhook` after every code deployment. The webhook remains configured unless its URL or secret changes.
-
----
+Check Telegram `/status` for VM state, **live** Smart Enabled/Disabled, tracked active tasks and inactivity/reply deadlines; also try `/autostart`, `/cost7d` and `/balance` as needed. For diagnostics, inspect Cloudflare Live logs and `systemctl --user status hermes-gateway.service` on the VM. Never copy the live Hermes signing secret into a README, a chat or a Git commit.
 
 # Security notes
 
@@ -740,7 +732,7 @@ The current intended runtime is:
 Cloudflare Worker + Telegram webhook + Azure API
 ```
 
-The active runtime is Cloudflare Worker + Telegram webhook + Azure API; GitHub is used only for source control and Cloudflare deployment.
+The active runtime is Cloudflare Worker + Telegram webhook + Azure API, with an optional Hermes task-monitor bridge. GitHub holds source and deployment scripts.
 
 ---
 
@@ -748,11 +740,11 @@ The active runtime is Cloudflare Worker + Telegram webhook + Azure API; GitHub i
 
 After deployment:
 
-1. Open the Worker URL and confirm `"ok": true`.
+1. Open the Worker URL and confirm `"ok": true` (HTTP health only).
 2. Run `getWebhookInfo` and confirm there is no webhook error.
-3. Send `/status`.
+3. Send `/status`, confirm `ENABLED` or `DISABLED (legacy timer)`, and check active task count if connected.
 4. Send `/cost7d`.
 5. Send `/balance`.
-6. Check Cloudflare live logs if a command does not reply.
+6. Check Cloudflare live logs and Hermes Gateway logs if a command/event does not work.
 
-If `/status` works, the Telegram webhook, Cloudflare Worker, and basic Azure connection are functioning.
+If `/status` works, the Telegram webhook and basic Azure connection are functioning; task-aware safety still depends on live signed Hermes event delivery.

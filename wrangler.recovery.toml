@@ -1,0 +1,25 @@
+name = "harmes-vm-automation"
+main = "src/legacy-recovery.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+keep_vars = true
+
+[vars]
+RESOURCE_GROUP = "harmes-vm_group"
+VM_NAME = "harmes-vm"
+# Safety default: deploying this branch must not activate task-driven deallocation.
+# Legacy recovery entrypoint does not use smart scheduler
+SMART_DEALLOCATE_ENABLED = "false"
+
+[triggers]
+crons = ["* * * * *"]
+
+# Task lifecycle metadata is stored durably, separate from VM safety tags.
+# A new Durable Object namespace is created on deployment.
+[[durable_objects.bindings]]
+name = "HERMES_TASK_STATE"
+class_name = "HermesTaskState"
+
+[[migrations]]
+tag = "v1-hermes-task-state"
+new_sqlite_classes = ["HermesTaskState"]

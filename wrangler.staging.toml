@@ -1,0 +1,15 @@
+name = "harmes-hermes-events-staging"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+workers_dev = true
+keep_vars = true
+
+# No cron triggers, Azure credentials, or Telegram bot secrets in staging.
+# Only the /hermes-event and /hermes-status endpoints are used here.
+[[durable_objects.bindings]]
+name = "HERMES_TASK_STATE"
+class_name = "HermesTaskState"
+
+[[migrations]]
+tag = "v1-hermes-task-state"
+new_sqlite_classes = ["HermesTaskState"]

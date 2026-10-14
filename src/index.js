@@ -1,3 +1,5 @@
+export { HermesTaskState } from "./hermes-task-state.js";
+
 let tokenCache = { token: null, expiresAt: 0 };
 
 const ARM = "https://management.azure.com";
@@ -35,6 +37,64 @@ export default {
       return new Response("OK");
     }
 
+    if (request.method === "GET" && url.pathname === "/hermes-status") {
+      // Read-only staging verification endpoint. Never returns messages or tokens.
+      const secret = String(env.HERMES_EVENT_SECRET || "");
+      if (secret.length < 32 || !env.HERMES_TASK_STATE) {
+        return new Response("Not configured", { status: 503 });
+      }
+      const supplied = request.headers.get("X-Hermes-Status-Token") || "";
+      // Both values are known to be nonempty and lengthy; avoid plain string equality.
+      const enc = new TextEncoder();
+      const key = await crypto.subtle.importKey("raw", enc.encode(secret),
+        { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+      // The caller supplies a short-lived, epoch-minute-specific digest.
+      const nowMinute = Math.floor(Date.now() / 60000);
+      const valid = await Promise.all([nowMinute - 1, nowMinute, nowMinute + 1].map(async minute => {
+        const bytes = await crypto.subtle.sign("HMAC", key, enc.encode("status:" + minute));
+        return [...new Uint8Array(bytes)].map(x => x.toString(16).padStart(2, "0")).join("") === supplied;
+      }));
+      if (!valid.some(Boolean)) return new Response("Unauthorized", { status: 401 });
+      const id = env.HERMES_TASK_STATE.idFromName("single-vm");
+      return env.HERMES_TASK_STATE.get(id).fetch("https://internal/status");
+    }
+
+    if (request.method === "POST" && url.pathname === "/hermes-event") {
+      // Task lifecycle receiver only. No VM-power action in this version.
+      const secret = String(env.HERMES_EVENT_SECRET || "");
+      if (secret.length < 32 || !env.HERMES_TASK_STATE) {
+        return new Response("Not configured", { status: 503 });
+      }
+      const raw = await request.text();
+      if (raw.length > 4096) return new Response("Too large", { status: 413 });
+      const signature = request.headers.get("X-Hermes-Signature-256") || "";
+      const key = await crypto.subtle.importKey("raw",
+        new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" },
+        false, ["verify"]);
+      const supplied = signature.startsWith("sha256=") ? signature.slice(7) : "";
+      if (!/^[0-9a-f]{64}$/i.test(supplied)) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      const bytes = new Uint8Array(supplied.match(/../g).map(x => parseInt(x, 16)));
+      const authenticated = await crypto.subtle.verify("HMAC", key, bytes,
+        new TextEncoder().encode(raw));
+      if (!authenticated) return new Response("Unauthorized", { status: 401 });
+      let payload;
+      try { payload = JSON.parse(raw); }
+      catch { return new Response("Bad JSON", { status: 400 }); }
+      const now = Math.floor(Date.now() / 1000);
+      if (!Number.isInteger(payload.timestamp) || Math.abs(now - payload.timestamp) > 300) {
+        return new Response("Stale event", { status: 400 });
+      }
+      const objectId = env.HERMES_TASK_STATE.idFromName("single-vm");
+      return env.HERMES_TASK_STATE.get(objectId).fetch(
+        new Request("https://internal/event", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        })
+      );
+    }
+
     return new Response("Not Found", { status: 404 });
   },
 
@@ -42,6 +102,59 @@ export default {
     ctx.waitUntil(runScheduler(env));
   }
 };
+
+
+async function taskRpc(env, path, payload) {
+  if (!env.HERMES_TASK_STATE) return null;
+  const id = env.HERMES_TASK_STATE.idFromName("single-vm");
+  const req = path === "/status"
+    ? new Request("https://internal/status")
+    : new Request("https://internal" + path, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload || {})
+      });
+  const res = await env.HERMES_TASK_STATE.get(id).fetch(req);
+  if (!res.ok) throw new Error("Hermes state " + path + ": HTTP " + res.status);
+  return res.json();
+}
+async function handleSmartScheduler(env) {
+  const tick = await taskRpc(env, "/tick");
+  if (!tick || tick.action === "legacy") return false;
+  if (tick.action === "prompt") {
+    await sendMessage(env,
+      (tick.stale ? "⚠️ Hermes heartbeat is stale.\\n" : "") +
+      "🤖 Hermes is inactive. Keep VM running?\\n" +
+      "No reply within 5 minutes = Azure DEALLOCATION.",
+      [[{ text: "✅ Keep Alive +15m", callback_data: "smartkeep15|" + tick.token }],
+       [{ text: "📊 Status", callback_data: "status|0" },
+        { text: "🛑 Deallocate now", callback_data: "smartstop|" + tick.token }]]
+    );
+    await taskRpc(env, "/prompt-delivered", { token: tick.token });
+  } else if (tick.action === "due") {
+    const claim = await taskRpc(env, "/claim", { token: tick.token });
+    if (claim?.ok) {
+      try {
+        const latest = await taskRpc(env, "/status");
+        if (latest?.deallocating && latest.activeCount === 0) {
+          // Final serialized state check limits a late-start race; external
+          // Azure dispatch is still not atomic with Hermes event ingress.
+          const preflight = await taskRpc(env, "/preflight", { token: tick.token });
+          if (!preflight?.ok) return true;
+          await deallocateVm(env);
+          await mergeTags(env, {
+            RunUntilEpoch: 0, RunUntilLocal: "none",
+            WarningForEpoch: 0, LastPowerState: "deallocating"
+          });
+          await sendMessage(env, "🛑 Hermes idle window expired: VM DEALLOCATION requested.");
+        } else await taskRpc(env, "/release", { token: tick.token });
+      } catch (err) {
+        await taskRpc(env, "/release", { token: tick.token });
+        throw err;
+      }
+    }
+  }
+  return true;
+}
 
 async function getAzureToken(env) {
   if (tokenCache.token && Date.now() < tokenCache.expiresAt) {
@@ -272,6 +385,16 @@ async function statusMessage(env) {
     lines.push("⏳ Planned deallocation: not currently set");
   }
 
+  if (env.HERMES_TASK_STATE) {
+    const task = await taskRpc(env, "/status");
+    if (task?.managed) {
+      lines.push(`🤖 Hermes active tasks: ${task.activeCount}`);
+      if (task.pendingUntil > now) lines.push(`⏰ Reply by: ${formatDhakaEpoch(task.pendingUntil)}`);
+      else if (!task.activeCount && task.idleUntil > now)
+        lines.push(`💤 Inactivity deadline: ${formatDhakaEpoch(task.idleUntil)}`);
+    }
+  }
+  lines.push(`🤖 Smart auto-deallocation: ${String(env.SMART_DEALLOCATE_ENABLED || "").toLowerCase() === "true" ? "ENABLED" : "DISABLED (legacy timer)"}`);
   lines.push(`⏰ Daily auto-start: ${auto} (Bangladesh time)`);
   return lines.join("\n");
 }
@@ -291,7 +414,7 @@ async function requestStart(env, source = "Telegram") {
       );
     }
 
-    const newDeadline = now + 30 * 60;
+    const newDeadline = now + 10 * 60;
     await mergeTags(env, {
       RunUntilEpoch: newDeadline,
       RunUntilLocal: formatTagTime(newDeadline),
@@ -301,13 +424,14 @@ async function requestStart(env, source = "Telegram") {
 
     return (
       `🟢 ${env.VM_NAME} is already RUNNING.\n` +
-      "A fresh 30-minute safety timer was attached.\n" +
+      "A fresh 10-minute safety timer was attached.\n" +
       `Planned deallocation: ${formatDhakaEpoch(newDeadline)}`
     );
   }
 
   await startVm(env);
-  const deadline = now + 30 * 60;
+  await taskRpc(env, "/reset");
+  const deadline = now + 10 * 60;
 
   await mergeTags(env, {
     RunUntilEpoch: deadline,
@@ -318,7 +442,7 @@ async function requestStart(env, source = "Telegram") {
 
   return (
     `🟡 ${source} START request accepted for ${env.VM_NAME}.\n` +
-    "A 30-minute safety timer is active.\n" +
+    "A 10-minute safety timer is active.\n" +
     `Planned deallocation: ${formatDhakaEpoch(deadline)}`
   );
 }
@@ -353,6 +477,8 @@ async function extendRuntime(env, minutes) {
     WarningForEpoch: 0
   });
 
+  await taskRpc(env, "/extend", { deadline });
+
   return (
     `✅ ${env.VM_NAME} extended by ${humanMinutes(minutes)}.\n` +
     `New planned deallocation: ${formatDhakaEpoch(deadline)}`
@@ -371,6 +497,22 @@ async function handleTelegramUpdate(update, env) {
       const [action, expectedRaw] = raw.split("|", 2);
       const expectedDeadline = Number(expectedRaw || 0);
 
+      if (action === "smartkeep15") {
+        const result = await taskRpc(env, "/keep", { token: expectedRaw });
+        await answerCallback(env, callbackId, result?.ok ? "Kept alive 15 minutes" : "Confirmation expired");
+        if (result?.ok) await sendMessage(env, "✅ VM kept alive for another 15 minutes.");
+        return;
+      }
+      if (action === "smartstop") {
+        const result = await taskRpc(env, "/manual-stop", { token: expectedRaw });
+        if (!result?.ok) {
+          await answerCallback(env, callbackId, "Confirmation expired or Hermes is busy");
+          return;
+        }
+        await answerCallback(env, callbackId, "Deallocating");
+        await sendMessage(env, await requestDeallocate(env, "Smart confirmation"));
+        return;
+      }
       if (action === "status") {
         await answerCallback(env, callbackId, "Status sent");
         await sendMessage(env, await statusMessage(env));
@@ -526,7 +668,7 @@ async function handleAutoStartCommand(env, rawText) {
   await sendMessage(
     env,
     `✅ Daily auto-start changed to ${formatHhmm12(value)} Bangladesh time.\n` +
-      "Auto-started runs receive a fresh 30-minute safety timer."
+      "Auto-started runs receive a fresh 10-minute safety timer."
   );
 }
 
@@ -558,7 +700,7 @@ async function runScheduler(env) {
     ) {
       if (state.code !== "running") {
         await startVm(env);
-        const deadline = epochNow() + 30 * 60;
+        const deadline = epochNow() + 10 * 60;
 
         await mergeTags(env, {
           RunUntilEpoch: deadline,
@@ -591,7 +733,7 @@ async function runScheduler(env) {
         await mergeTags(env, { LastPowerState: "running" });
       } else if (lastState !== "running") {
         if (deadline <= nowEpoch) {
-          deadline = nowEpoch + 30 * 60;
+          deadline = nowEpoch + 10 * 60;
           await mergeTags(env, {
             RunUntilEpoch: deadline,
             RunUntilLocal: formatTagTime(deadline),
@@ -614,7 +756,7 @@ async function runScheduler(env) {
       deadline = intTag(tags.RunUntilEpoch);
 
       if (deadline <= 0) {
-        deadline = nowEpoch + 30 * 60;
+        deadline = nowEpoch + 10 * 60;
         await mergeTags(env, {
           RunUntilEpoch: deadline,
           RunUntilLocal: formatTagTime(deadline),
@@ -624,6 +766,13 @@ async function runScheduler(env) {
 
       const remaining = deadline - epochNow();
       const warnedFor = intTag(tags.WarningForEpoch);
+
+      // Task-aware shutdown takes precedence. Legacy timer stays as fallback
+      // until the first authenticated task event reaches this Worker.
+      // Explicit production opt-in: a code deploy alone must NEVER enable
+      // task-driven VM power transitions. Legacy timers remain in force.
+      if (String(env.SMART_DEALLOCATE_ENABLED || "").toLowerCase() === "true" &&
+          env.HERMES_TASK_STATE && await handleSmartScheduler(env)) return;
 
       if (remaining <= 0) {
         await deallocateVm(env);
@@ -666,6 +815,7 @@ async function runScheduler(env) {
     }
 
     if (state.code === "deallocated") {
+      await taskRpc(env, "/reset");
       if (lastState === "deallocating") {
         await mergeTags(env, {
           RunUntilEpoch: 0,
@@ -1023,7 +1173,7 @@ function helpText() {
     "⚙️ VM_Hermes commands",
     "",
     "/status — VM status, deallocation time, auto-start",
-    "/startvm — start VM with 30-minute timer",
+    "/startvm — start VM with 10-minute timer",
     "/deallocate — deallocate now",
     "/keep30 — +30 minutes",
     "/keep60 — +1 hour",
