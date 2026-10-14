@@ -10,6 +10,8 @@ function initial() {
     lastEventAt: 0,
     lastCompleteAt: 0,
     receivedCount: 0,
+    heartbeatCount: 0,
+    lastHeartbeatAt: 0,
     recentDeliveries: [],
     idleUntil: 0,
     pendingToken: "",
@@ -35,6 +37,8 @@ function snapshot(s, now) {
     lastEventAt: s.lastEventAt,
     lastCompleteAt: s.lastCompleteAt,
     receivedCount: s.receivedCount,
+    heartbeatCount: number(s.heartbeatCount),
+    lastHeartbeatAt: number(s.lastHeartbeatAt),
     idleUntil: s.idleUntil,
     pendingUntil: s.pendingUntil,
     promptDelivered: !!s.promptDelivered,
@@ -63,7 +67,13 @@ function processEvent(s, input, now) {
     cancelPrompt(s);
   } else if (input.event === "agent:step" || input.event === "agent:heartbeat") {
     // Never resurrect a previously completed or unknown session.
-    if (s.sessions[input.session_id]) s.sessions[input.session_id].lastSeen = now;
+    if (s.sessions[input.session_id]) {
+      s.sessions[input.session_id].lastSeen = now;
+      if (input.event === "agent:heartbeat") {
+        s.heartbeatCount = number(s.heartbeatCount) + 1;
+        s.lastHeartbeatAt = now;
+      }
+    }
   } else {
     const existed = !!s.sessions[input.session_id];
     delete s.sessions[input.session_id];
