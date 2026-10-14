@@ -261,3 +261,25 @@ test('DRY RUN: smart automation remains disabled until explicit opt-in',async()=
     assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,0);
   }finally{x.restore();}
 });
+
+test('DRY RUN: legacy mode attaches 10m timer, warns at 5m, Azure deallocates at 10m',async()=>{
+  const x=dryRun();
+  try {
+    x.env.SMART_DEALLOCATE_ENABLED='false';
+    x.tags.RunUntilEpoch='0';
+    await x.command('/startvm');
+    const deadline=Number(x.tags.RunUntilEpoch);
+    assert.equal(deadline-x.epoch(),10*60);
+    assert.ok(x.sent.some(m=>m.text?.includes('10-minute safety timer')));
+    x.advance(minutes(4));
+    await x.tick();
+    assert.equal(x.sent.filter(m=>m.text?.includes('about 5 minutes')).length,0);
+    x.advance(minutes(1));
+    await x.tick();
+    assert.equal(x.sent.filter(m=>m.text?.includes('about 5 minutes')).length,1);
+    assert.equal(x.countStops(),0);
+    x.advance(minutes(5));
+    await x.tick();
+    assert.equal(x.countStops(),1,'legacy mode must invoke Azure /deallocate, not OS shutdown');
+  }finally{x.restore();}
+});
