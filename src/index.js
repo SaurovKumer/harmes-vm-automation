@@ -390,6 +390,7 @@ async function statusMessage(env) {
         lines.push(`💤 Inactivity deadline: ${formatDhakaEpoch(task.idleUntil)}`);
     }
   }
+  lines.push(`🤖 Smart auto-deallocation: ${String(env.SMART_DEALLOCATE_ENABLED || "").toLowerCase() === "true" ? "ENABLED" : "DISABLED (legacy timer)"}`);
   lines.push(`⏰ Daily auto-start: ${auto} (Bangladesh time)`);
   return lines.join("\n");
 }
@@ -764,7 +765,10 @@ async function runScheduler(env) {
 
       // Task-aware shutdown takes precedence. Legacy timer stays as fallback
       // until the first authenticated task event reaches this Worker.
-      if (env.HERMES_TASK_STATE && await handleSmartScheduler(env)) return;
+      // Explicit production opt-in: a code deploy alone must NEVER enable
+      // task-driven VM power transitions. Legacy timers remain in force.
+      if (String(env.SMART_DEALLOCATE_ENABLED || "").toLowerCase() === "true" &&
+          env.HERMES_TASK_STATE && await handleSmartScheduler(env)) return;
 
       if (remaining <= 0) {
         await deallocateVm(env);
