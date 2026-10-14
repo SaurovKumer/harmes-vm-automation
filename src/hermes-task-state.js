@@ -14,6 +14,7 @@ function initial() {
     lastHeartbeatAt: 0,
     recentDeliveries: [],
     idleUntil: 0,
+    manualExtensionUntil: 0,
     pendingToken: "",
     pendingUntil: 0,
     promptDelivered: false,
@@ -40,6 +41,7 @@ function snapshot(s, now) {
     heartbeatCount: number(s.heartbeatCount),
     lastHeartbeatAt: number(s.lastHeartbeatAt),
     idleUntil: s.idleUntil,
+    manualExtensionUntil: number(s.manualExtensionUntil),
     pendingUntil: s.pendingUntil,
     promptDelivered: !!s.promptDelivered,
     deallocating: !!s.deallocating
@@ -53,7 +55,9 @@ function cancelPrompt(s) {
   s.deallocating = false;
 }
 function newIdle(s, now, seconds=IDLE_SECONDS) {
-  s.idleUntil = now + seconds;
+  // Preserve a /keep60 or other explicit runtime extension even when
+  // an agent:end or a fresh agent:start arrives after the user extended.
+  s.idleUntil = Math.max(now + seconds, number(s.manualExtensionUntil));
   cancelPrompt(s);
 }
 function processEvent(s, input, now) {
@@ -65,6 +69,7 @@ function processEvent(s, input, now) {
     s.sessions[input.session_id] = { startedAt: now, lastSeen: now };
     s.idleUntil = 0;
     cancelPrompt(s);
+    s.staleWarning = false;
   } else if (input.event === "agent:step" || input.event === "agent:heartbeat") {
     // Never resurrect a previously completed or unknown session.
     if (s.sessions[input.session_id]) {
@@ -160,6 +165,7 @@ export class HermesTaskState {
       if (s.lastEventAt && !s.deallocating) {
         const deadline = number(input.deadline);
         if (deadline > now && deadline < now + 24 * 3600) {
+          s.manualExtensionUntil = Math.max(number(s.manualExtensionUntil), deadline);
           s.idleUntil = Math.max(s.idleUntil || 0, deadline);
           cancelPrompt(s);
         }
