@@ -187,6 +187,16 @@ export class HermesTaskState {
         s.deallocating = true;
         answer = { ok: true, generation: s.generation };
       } else answer = { ok: false };
+    } else if (path === "/preflight") {
+      // One last SERIALIZED check before handing the request to Azure.
+      // A Hermes start after the claim cancels pending deallocation.
+      // There is still an unavoidable external API race AFTER this call.
+      const valid = !!s.pendingToken
+        && s.pendingToken === input.token
+        && s.promptDelivered
+        && s.deallocating
+        && Object.keys(s.sessions || {}).length === 0;
+      answer = { ok: valid };
     } else if (path === "/release") {
       // Failed Azure call can be retried next cron tick.
       if (s.deallocating && s.pendingToken === input.token) s.deallocating = false;
