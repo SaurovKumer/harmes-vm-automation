@@ -414,7 +414,7 @@ async function requestStart(env, source = "Telegram") {
       );
     }
 
-    const newDeadline = now + 30 * 60;
+    const newDeadline = now + 10 * 60;
     await mergeTags(env, {
       RunUntilEpoch: newDeadline,
       RunUntilLocal: formatTagTime(newDeadline),
@@ -424,14 +424,14 @@ async function requestStart(env, source = "Telegram") {
 
     return (
       `🟢 ${env.VM_NAME} is already RUNNING.\n` +
-      "A fresh 30-minute safety timer was attached.\n" +
+      "A fresh 10-minute safety timer was attached.\n" +
       `Planned deallocation: ${formatDhakaEpoch(newDeadline)}`
     );
   }
 
   await startVm(env);
   await taskRpc(env, "/reset");
-  const deadline = now + 30 * 60;
+  const deadline = now + 10 * 60;
 
   await mergeTags(env, {
     RunUntilEpoch: deadline,
@@ -442,7 +442,7 @@ async function requestStart(env, source = "Telegram") {
 
   return (
     `🟡 ${source} START request accepted for ${env.VM_NAME}.\n` +
-    "A 30-minute safety timer is active.\n" +
+    "A 10-minute safety timer is active.\n" +
     `Planned deallocation: ${formatDhakaEpoch(deadline)}`
   );
 }
@@ -668,7 +668,7 @@ async function handleAutoStartCommand(env, rawText) {
   await sendMessage(
     env,
     `✅ Daily auto-start changed to ${formatHhmm12(value)} Bangladesh time.\n` +
-      "Auto-started runs receive a fresh 30-minute safety timer."
+      "Auto-started runs receive a fresh 10-minute safety timer."
   );
 }
 
@@ -700,7 +700,7 @@ async function runScheduler(env) {
     ) {
       if (state.code !== "running") {
         await startVm(env);
-        const deadline = epochNow() + 30 * 60;
+        const deadline = epochNow() + 10 * 60;
 
         await mergeTags(env, {
           RunUntilEpoch: deadline,
@@ -733,7 +733,7 @@ async function runScheduler(env) {
         await mergeTags(env, { LastPowerState: "running" });
       } else if (lastState !== "running") {
         if (deadline <= nowEpoch) {
-          deadline = nowEpoch + 30 * 60;
+          deadline = nowEpoch + 10 * 60;
           await mergeTags(env, {
             RunUntilEpoch: deadline,
             RunUntilLocal: formatTagTime(deadline),
@@ -756,7 +756,7 @@ async function runScheduler(env) {
       deadline = intTag(tags.RunUntilEpoch);
 
       if (deadline <= 0) {
-        deadline = nowEpoch + 30 * 60;
+        deadline = nowEpoch + 10 * 60;
         await mergeTags(env, {
           RunUntilEpoch: deadline,
           RunUntilLocal: formatTagTime(deadline),
@@ -1173,7 +1173,7 @@ function helpText() {
     "⚙️ VM_Hermes commands",
     "",
     "/status — VM status, deallocation time, auto-start",
-    "/startvm — start VM with 30-minute timer",
+    "/startvm — start VM with 10-minute timer",
     "/deallocate — deallocate now",
     "/keep30 — +30 minutes",
     "/keep60 — +1 hour",
