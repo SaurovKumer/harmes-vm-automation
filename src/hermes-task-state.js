@@ -1,6 +1,6 @@
 // Durable Object: serializes task events, inactivity state and shutdown claims.
 // All routes are internal to the bound Cloudflare Worker.
-const IDLE_SECONDS = 30 * 60;
+const IDLE_SECONDS = 10 * 60; // Task completion -> deallocation window.
 const CONFIRM_SECONDS = 5 * 60;
 const STALE_SECONDS = 45 * 60; // Lost gateway/heartbeats: ask owner rather than run forever.
 
@@ -104,7 +104,8 @@ function clockDecision(s, now) {
   if (Object.keys(s.sessions).length) return { action: "active" };
   if (!s.idleUntil) s.idleUntil = now + IDLE_SECONDS;
 
-  if (!s.pendingToken && now >= s.idleUntil) {
+  // Prompt 5 minutes BEFORE the idle deadline, giving the owner a reply window.
+  if (!s.pendingToken && now >= s.idleUntil - CONFIRM_SECONDS) {
     s.pendingToken = String(++s.generation);
     s.pendingUntil = 0;
     s.promptDelivered = false;
