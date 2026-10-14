@@ -120,3 +120,27 @@ test('periodic heartbeat keeps a long-running session active; stale session prom
     assert.equal(stale.stale,true);
   } finally {Date.now=old;}
 });
+
+test('manual +60 minute extension survives task end and an intervening new task',async()=>{
+  const old=Date.now;
+  try {
+    let current=1_800_400_000_000;
+    Date.now=()=>current;
+    const {post,status}=setup();
+    await post('/event',event('start','session-a','delivery111'));
+    const extendedTo=Math.floor(current/1000)+3600;
+    await post('/extend',{deadline:extendedTo});
+    current+=10*60*1000;
+    await post('/event',event('end','session-a','delivery222'));
+    assert.equal((await status()).idleUntil,extendedTo);
+    current+=60*1000;
+    await post('/event',event('start','session-b','delivery333'));
+    current+=5*60*1000;
+    await post('/event',event('end','session-b','delivery444'));
+    assert.equal((await status()).idleUntil,extendedTo);
+    current=Math.floor(extendedTo*1000)-1000;
+    assert.equal((await post('/tick')).action,'idle');
+    current=extendedTo*1000;
+    assert.equal((await post('/tick')).action,'prompt');
+  }finally{Date.now=old;}
+});
