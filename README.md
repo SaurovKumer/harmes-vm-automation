@@ -12,7 +12,7 @@ The current runtime is a **Cloudflare Worker + Telegram webhook + Azure APIs**. 
 
 - Start the Azure VM from Telegram
 - Deallocate the VM from Telegram
-- Legacy 30-minute safety runtime after a VM start, when smart mode is OFF/uninitialized
+- Legacy 10-minute safety runtime after a VM start, when smart mode is OFF/uninitialized
 - Optional Hermes task-aware idle tracking, 5-minute Telegram confirmation and Azure deallocation
 - Warning about 5 minutes before automatic deallocation
 - Runtime extension buttons: +30m, +1h, +2h, +3h, +4h
@@ -33,7 +33,7 @@ The current runtime is a **Cloudflare Worker + Telegram webhook + Azure APIs**. 
 | Command | Description |
 | --- | --- |
 | `/status` | Show VM state, planned deallocation time, remaining runtime, and auto-start setting |
-| `/startvm` | Start the VM and attach a 30-minute safety timer |
+| `/startvm` | Start the VM and attach a 10-minute safety timer |
 | `/deallocate` | Deallocate the VM immediately |
 | `/shutdown` | Alias for `/deallocate` |
 | `/keep30` | Extend runtime by 30 minutes |
@@ -72,7 +72,7 @@ Hermes Gateway --signed POST /hermes-event------+
                                   (active sessions, heartbeat, idle deadline)
 
 Cloudflare cron (* * * * *): daily auto-start and safety scheduling
-  - Legacy 30-minute timer when smart mode is OFF or uninitialized
+  - Legacy 10-minute timer when smart mode is OFF or uninitialized
   - Task-aware idle/confirmation policy when enabled and managed
 ```
 
@@ -124,11 +124,11 @@ SUCCESS: Production Hermes connected and Smart Auto-DEALLOCATE activated.
 
 Then send **`/status`** to the Telegram bot to verify the deployed state:
 - `Smart auto-deallocation: ENABLED` means task-aware scheduling is enabled.
-- `Smart auto-deallocation: DISABLED (legacy timer)` means the 30-minute fallback runs instead.
+- `Smart auto-deallocation: DISABLED (legacy timer)` means the 10-minute fallback runs instead.
 
 The checked-in `wrangler.toml` deliberately stays at `false`. **Warning: running `npx.cmd wrangler deploy --config wrangler.toml` after activation deploys OFF and can disable smart mode.**
 
-**Updated smart idle policy (October 14, 2026):** New Hermes task completions start a 10-minute window: confirmation after 5 minutes and deallocation after a further 5 minutes without a response. This is **only the task-aware smart timer**; the **legacy 30-minute VM-start safety timer remains unchanged**. The policy takes effect in production only after a deliberate deployment that preserves/enables Smart Mode, not merely after a GitHub commit. Do not assume that a green health endpoint proves the bridge is functioning.
+**Updated timer policy (October 14, 2026):** Both the default VM-start safety timer (Legacy Mode) and completed-Hermes-task inactivity window (Smart Mode) use **10 minutes**. Telegram warns after **5 minutes**, with **5 more minutes** to extend. Healthy active Hermes tasks are protected in Smart Mode; Legacy Mode does not know whether Hermes is busy. The policy takes effect in production only after a deliberate deployment that preserves/enables Smart Mode, not merely after a GitHub commit. Do not assume that a green health endpoint proves the bridge is functioning.
 
 ### Recovery option
 
@@ -650,7 +650,7 @@ The Worker includes retry handling for temporary Azure throttling such as HTTP `
 
 # Safety timer: legacy vs. Hermes smart mode
 
-**Legacy (smart OFF or task tracker not initialized):** Every detected VM start receives a **30-minute** safety deadline. About **5 minutes** before expiry Telegram offers extensions (+30m, +1h, +2h, +3h, +4h). Without an extension the Worker requests Azure **deallocation**. Legacy mode does **not** protect a long-running Hermes task.
+**Legacy (smart OFF or task tracker not initialized):** Every detected VM start receives a **10-minute** safety deadline. About **5 minutes** before expiry Telegram offers extensions (+30m, +1h, +2h, +3h, +4h). Without an extension the Worker requests Azure **deallocation**. Legacy mode does **not** protect a long-running Hermes task.
 
 **Smart (explicitly ON and tracking signed Hermes events):** `POST /hermes-event` accepts authenticated `agent:start`, `agent:step`, `agent:heartbeat` and `agent:end` events. While a tracked task is active, the task-aware idle policy waits. When the last tracked task ends, a **10-minute inactivity window** begins. At approximately **5 minutes after task completion** (5 minutes before planned deallocation), Telegram asks whether to keep the VM running. The user has **5 minutes to respond**. The confirmation buttons are **Keep Alive +15m**, Status and Deallocate now. No response requests Azure **deallocate** (not just OS shutdown). The system treats a session with no new activity/heartbeat for **45 minutes** as stale and triggers an early confirmation rather than waiting indefinitely.
 
