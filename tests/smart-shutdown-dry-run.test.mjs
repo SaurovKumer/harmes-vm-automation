@@ -31,6 +31,7 @@ function dryRun() {
     }
   });
   const env = {
+    SMART_DEALLOCATE_ENABLED: 'true',
     HERMES_TASK_STATE: {
       idFromName(name) { assert.equal(name, 'single-vm'); return name; },
       get() { return { fetch(req) { return durable.fetch(req); } }; }
@@ -149,7 +150,7 @@ function dryRun() {
 }
 const minutes=(x)=>x*60*1000;
 
-test('DRY RUN: active task blocks expired legacy timer; idle triggers 5m warning then shutdown', async()=>{
+test('DRY RUN: active task blocks expired legacy timer; idle triggers 5m warning then Azure deallocation', async()=>{
   const x=dryRun();
   try {
     await x.event('start');
@@ -176,7 +177,7 @@ test('DRY RUN: active task blocks expired legacy timer; idle triggers 5m warning
   } finally{x.restore();}
 });
 
-test('DRY RUN: Telegram Keep Alive +15m cancels original shutdown', async()=>{
+test('DRY RUN: Telegram Keep Alive +15m cancels original deallocation', async()=>{
   const x=dryRun();
   try {
     await x.event('start');
@@ -241,4 +242,17 @@ test('DRY RUN: manual Telegram /keep60 survives agent end', async()=>{
     assert.equal(x.countStops(),0);
     assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,0);
   } finally{x.restore();}
+});
+
+test('DRY RUN: smart automation remains disabled until explicit opt-in',async()=>{
+  const x=dryRun();
+  try{
+    x.env.SMART_DEALLOCATE_ENABLED='false';
+    await x.event('start');
+    x.advance(minutes(31));
+    await x.tick();
+    assert.equal(x.countStops(),1,
+      'legacy Azure deallocation deadline remains active when smart mode disabled');
+    assert.equal(x.sent.filter(m=>m.text?.includes('Hermes is inactive')).length,0);
+  }finally{x.restore();}
 });
